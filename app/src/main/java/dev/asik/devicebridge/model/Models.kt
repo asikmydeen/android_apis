@@ -1,0 +1,207 @@
+package dev.asik.devicebridge.model
+
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+
+@Serializable
+data class HealthResponse(
+    val ok: Boolean = true,
+    val service: String = "device-bridge",
+    val version: String,
+    val uptime_sec: Long,
+    val server_time: String,
+    val running: Boolean = true,
+)
+
+@Serializable
+data class DeviceInfo(
+    val manufacturer: String,
+    val brand: String,
+    val model: String,
+    val product: String,
+    val device: String,
+    val sdk_int: Int,
+    val release: String,
+    val abis: List<String>,
+)
+
+@Serializable
+data class SensorInfo(
+    val type: Int,
+    val type_name: String,
+    val name: String,
+    val vendor: String,
+    val version: Int,
+    val max_range: Float,
+    val resolution: Float,
+    val power_ma: Float,
+    val min_delay_us: Int,
+    val available: Boolean = true,
+)
+
+@Serializable
+data class CameraInfo(
+    val id: String,
+    val facing: String,
+    val has_flash: Boolean,
+    val hardware_level: String? = null,
+    val available: Boolean = true,
+)
+
+@Serializable
+data class FeatureFlags(
+    val location: Boolean,
+    val camera: Boolean,
+    val microphone: Boolean,
+    val telephony: Boolean,
+    val wifi: Boolean,
+    val bluetooth: Boolean,
+)
+
+@Serializable
+data class CapabilitiesResponse(
+    val device: DeviceInfo,
+    val permissions: Map<String, String>,
+    val sensors: List<SensorInfo>,
+    val cameras: List<CameraInfo>,
+    val location_providers: List<String>,
+    val features: FeatureFlags,
+)
+
+@Serializable
+data class LocationReading(
+    val lat: Double,
+    val lon: Double,
+    val alt_m: Double? = null,
+    val accuracy_m: Float? = null,
+    val speed_mps: Float? = null,
+    val bearing_deg: Float? = null,
+    val provider: String? = null,
+    val time_ms: Long? = null,
+    val elapsed_realtime_nanos: Long? = null,
+)
+
+@Serializable
+data class BatteryReading(
+    val percent: Int?,
+    val status: String,
+    val plugged: String,
+    val health: String? = null,
+    val temp_c: Float? = null,
+    val voltage_mv: Int? = null,
+    val current_ua: Int? = null,
+    val technology: String? = null,
+)
+
+@Serializable
+data class WifiInfo(
+    val ssid: String? = null,
+    val bssid: String? = null,
+    val rssi: Int? = null,
+    val link_speed_mbps: Int? = null,
+    val frequency_mhz: Int? = null,
+)
+
+@Serializable
+data class NetworkReading(
+    val connected: Boolean,
+    val transport: List<String>,
+    val wifi: WifiInfo? = null,
+)
+
+@Serializable
+data class TelephonyReading(
+    val network_operator_name: String? = null,
+    val sim_operator_name: String? = null,
+    val data_network_type: String? = null,
+    val phone_type: String? = null,
+    val sim_state: String? = null,
+    val restricted: Boolean = false,
+    val note: String? = null,
+)
+
+@Serializable
+data class SensorReading(
+    val values: List<Float>,
+    val accuracy: Int,
+    val timestamp_ns: Long,
+    val type: Int? = null,
+    val type_name: String? = null,
+)
+
+@Serializable
+data class CameraMeta(
+    val active_camera_id: String? = null,
+    val last_capture: CaptureMeta? = null,
+)
+
+@Serializable
+data class CaptureMeta(
+    val camera_id: String,
+    val path: String,
+    val bytes: Int,
+    val captured_at: String,
+    val content_url: String = "/v1/camera/last.jpg",
+)
+
+@Serializable
+data class CaptureResponse(
+    val ok: Boolean,
+    val capture: CaptureMeta,
+    val base64_jpeg: String? = null,
+)
+
+@Serializable
+data class DeviceSnapshot(
+    val timestamp: String,
+    val location: LocationReading? = null,
+    val battery: BatteryReading? = null,
+    val network: NetworkReading? = null,
+    val telephony: TelephonyReading? = null,
+    val sensors: Map<String, SensorReading> = emptyMap(),
+    val camera_meta: CameraMeta? = null,
+    val errors: List<String> = emptyList(),
+)
+
+@Serializable
+data class ApiErrorBody(
+    val error: ApiError,
+)
+
+@Serializable
+data class ApiError(
+    val code: String,
+    val message: String,
+    val permission: String? = null,
+)
+
+@Serializable
+data class ConfigResponse(
+    val bind: String,
+    val port: Int,
+    val base_url: String,
+    val auth_enabled: Boolean,
+    val version: String,
+)
+
+@Serializable
+data class StreamEnvelope(
+    val topic: String,
+    val ts: String,
+    val data: JsonElement = JsonObject(emptyMap()),
+)
+
+@Serializable
+data class ClientControlMessage(
+    val op: String,
+    val topics: List<String>? = null,
+    val topic: String? = null,
+    val hz: Int? = null,
+)
+
+@Serializable
+data class SimpleStatus(
+    val ok: Boolean,
+    val message: String,
+)

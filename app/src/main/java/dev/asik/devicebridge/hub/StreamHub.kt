@@ -1,0 +1,87 @@
+package dev.asik.devicebridge.hub
+
+import dev.asik.devicebridge.model.BatteryReading
+import dev.asik.devicebridge.model.CameraMeta
+import dev.asik.devicebridge.model.LocationReading
+import dev.asik.devicebridge.model.NetworkReading
+import dev.asik.devicebridge.model.SensorReading
+import dev.asik.devicebridge.model.TelephonyReading
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * In-memory last-value cache + broadcast bus for REST snapshots and WebSockets.
+ */
+class StreamHub {
+    private val _location = MutableStateFlow<LocationReading?>(null)
+    val location: StateFlow<LocationReading?> = _location.asStateFlow()
+
+    private val _battery = MutableStateFlow<BatteryReading?>(null)
+    val battery: StateFlow<BatteryReading?> = _battery.asStateFlow()
+
+    private val _network = MutableStateFlow<NetworkReading?>(null)
+    val network: StateFlow<NetworkReading?> = _network.asStateFlow()
+
+    private val _telephony = MutableStateFlow<TelephonyReading?>(null)
+    val telephony: StateFlow<TelephonyReading?> = _telephony.asStateFlow()
+
+    private val sensorsMap = ConcurrentHashMap<String, SensorReading>()
+    private val _sensors = MutableStateFlow<Map<String, SensorReading>>(emptyMap())
+    val sensors: StateFlow<Map<String, SensorReading>> = _sensors.asStateFlow()
+
+    private val _cameraMeta = MutableStateFlow(CameraMeta())
+    val cameraMeta: StateFlow<CameraMeta> = _cameraMeta.asStateFlow()
+
+    private val _events = MutableSharedFlow<HubEvent>(
+        replay = 0,
+        extraBufferCapacity = 256,
+    )
+    val events: SharedFlow<HubEvent> = _events.asSharedFlow()
+
+    fun publishLocation(value: LocationReading) {
+        _location.value = value
+        _events.tryEmit(HubEvent.Location(value))
+    }
+
+    fun publishBattery(value: BatteryReading) {
+        _battery.value = value
+        _events.tryEmit(HubEvent.Battery(value))
+    }
+
+    fun publishNetwork(value: NetworkReading) {
+        _network.value = value
+        _events.tryEmit(HubEvent.Network(value))
+    }
+
+    fun publishTelephony(value: TelephonyReading) {
+        _telephony.value = value
+        _events.tryEmit(HubEvent.Telephony(value))
+    }
+
+    fun publishSensor(typeName: String, value: SensorReading) {
+        sensorsMap[typeName] = value
+        _sensors.value = sensorsMap.toMap()
+        _events.tryEmit(HubEvent.Sensor(typeName, value))
+    }
+
+    fun publishCameraMeta(value: CameraMeta) {
+        _cameraMeta.value = value
+        _events.tryEmit(HubEvent.Camera(value))
+    }
+
+    fun sensorSnapshot(): Map<String, SensorReading> = sensorsMap.toMap()
+}
+
+sealed class HubEvent {
+    data class Location(val reading: LocationReading) : HubEvent()
+    data class Battery(val reading: BatteryReading) : HubEvent()
+    data class Network(val reading: NetworkReading) : HubEvent()
+    data class Telephony(val reading: TelephonyReading) : HubEvent()
+    data class Sensor(val typeName: String, val reading: SensorReading) : HubEvent()
+    data class Camera(val meta: CameraMeta) : HubEvent()
+}

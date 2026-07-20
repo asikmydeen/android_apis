@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Device Bridge</string>
+    <string name="notification_channel_name">Device Bridge service</string>
+    <string name="notification_channel_desc">Keeps the local API server running</string>
+    <string name="notification_title">Device Bridge active</string>
+    <string name="notification_text">API at http://127.0.0.1:8765</string>
+    <string name="notification_stop">Stop</string>
+</resources>
