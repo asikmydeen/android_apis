@@ -8,6 +8,7 @@ import dev.asik.devicebridge.collectors.LocationCollector
 import dev.asik.devicebridge.collectors.NetworkCollector
 import dev.asik.devicebridge.collectors.SensorCollector
 import dev.asik.devicebridge.collectors.TelephonyCollector
+import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
 import kotlinx.coroutines.CoroutineScope
@@ -24,7 +25,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object BridgeRuntime {
     const val DEFAULT_BIND = "127.0.0.1"
     const val DEFAULT_PORT = 8765
-    const val VERSION = "1.0.0"
+    const val VERSION = "1.1.0"
 
     private val job = SupervisorJob()
     val scope = CoroutineScope(job + Dispatchers.Default)
@@ -47,6 +48,8 @@ object BridgeRuntime {
     lateinit var telephonyCollector: TelephonyCollector
         private set
     lateinit var cameraCollector: CameraCollector
+        private set
+    lateinit var usbCollector: UsbCollector
         private set
 
     private var server: BridgeServer? = null
@@ -73,6 +76,7 @@ object BridgeRuntime {
         networkCollector = NetworkCollector(app, hub)
         telephonyCollector = TelephonyCollector(app, hub, scope)
         cameraCollector = CameraCollector(app, hub)
+        usbCollector = UsbCollector(app, hub, scope)
     }
 
     fun requireContext(): Context =
@@ -90,6 +94,7 @@ object BridgeRuntime {
             hub = hub,
             capabilityScanner = capabilityScanner,
             cameraCollector = cameraCollector,
+            usbCollector = usbCollector,
             bindHost = bindHost,
             port = port,
             version = VERSION,
@@ -107,6 +112,7 @@ object BridgeRuntime {
         locationCollector.start()
         networkCollector.start()
         telephonyCollector.start()
+        usbCollector.start()
     }
 
     fun stopCollectors() {
@@ -115,6 +121,7 @@ object BridgeRuntime {
         locationCollector.stop()
         networkCollector.stop()
         telephonyCollector.stop()
+        usbCollector.stop()
     }
 
     suspend fun stopServer() {
@@ -126,8 +133,6 @@ object BridgeRuntime {
     }
 
     fun dispose() {
-        // Keep process-level; service manages start/stop.
-        // Only cancel if process is dying — not used in normal flow.
         job.cancel()
     }
 }

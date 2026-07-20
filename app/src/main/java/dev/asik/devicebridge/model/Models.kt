@@ -153,6 +153,74 @@ data class CaptureResponse(
 )
 
 @Serializable
+data class UsbInterfaceInfo(
+    val id: Int,
+    val iface_class: Int,
+    val iface_subclass: Int,
+    val iface_protocol: Int,
+    val endpoint_count: Int,
+    val name: String? = null,
+)
+
+@Serializable
+data class UsbDeviceInfo(
+    val device_id: String,
+    val device_name: String,
+    val vendor_id: Int,
+    val product_id: Int,
+    val vendor_id_hex: String,
+    val product_id_hex: String,
+    val device_class: Int,
+    val device_subclass: Int,
+    val device_protocol: Int,
+    val manufacturer: String? = null,
+    val product: String? = null,
+    val serial: String? = null,
+    val has_permission: Boolean,
+    val interface_count: Int,
+    val interfaces: List<UsbInterfaceInfo> = emptyList(),
+    val likely_mass_storage: Boolean = false,
+    val likely_serial: Boolean = false,
+)
+
+@Serializable
+data class UsbStorageVolume(
+    val id: String,
+    val label: String? = null,
+    val path: String? = null,
+    val state: String? = null,
+    val is_removable: Boolean = false,
+    val is_primary: Boolean = false,
+    val description: String? = null,
+    val proot_hint: String? = null,
+)
+
+@Serializable
+data class UsbOverview(
+    val host_supported: Boolean,
+    val device_count: Int,
+    val devices: List<UsbDeviceInfo>,
+    val storage_volumes: List<UsbStorageVolume>,
+    val notes: List<String> = emptyList(),
+)
+
+@Serializable
+data class UsbEvent(
+    val action: String,
+    val device: UsbDeviceInfo? = null,
+    val message: String? = null,
+)
+
+@Serializable
+data class UsbSerialOpenResponse(
+    val ok: Boolean,
+    val device_id: String,
+    val baud_rate: Int,
+    val message: String,
+    val stream_ws: String,
+)
+
+@Serializable
 data class DeviceSnapshot(
     val timestamp: String,
     val location: LocationReading? = null,
@@ -161,6 +229,7 @@ data class DeviceSnapshot(
     val telephony: TelephonyReading? = null,
     val sensors: Map<String, SensorReading> = emptyMap(),
     val camera_meta: CameraMeta? = null,
+    val usb: UsbOverview? = null,
     val errors: List<String> = emptyList(),
 )
 

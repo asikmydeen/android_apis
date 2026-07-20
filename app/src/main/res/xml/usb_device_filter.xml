@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Match any USB device when attached (user still grants permission per device). -->
+<resources>
+    <usb-device class="255" subclass="255" protocol="255" />
+    <usb-device class="8" subclass="6" protocol="80" />
+    <usb-device class="2" subclass="2" protocol="1" />
+    <usb-device class="10" subclass="0" protocol="0" />
+</resources>

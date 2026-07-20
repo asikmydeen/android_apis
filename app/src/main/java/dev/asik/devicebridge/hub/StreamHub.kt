@@ -1,11 +1,14 @@
 package dev.asik.devicebridge.hub
 
+import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.model.BatteryReading
 import dev.asik.devicebridge.model.CameraMeta
 import dev.asik.devicebridge.model.LocationReading
 import dev.asik.devicebridge.model.NetworkReading
 import dev.asik.devicebridge.model.SensorReading
 import dev.asik.devicebridge.model.TelephonyReading
+import dev.asik.devicebridge.model.UsbEvent
+import dev.asik.devicebridge.model.UsbOverview
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -36,6 +39,9 @@ class StreamHub {
 
     private val _cameraMeta = MutableStateFlow(CameraMeta())
     val cameraMeta: StateFlow<CameraMeta> = _cameraMeta.asStateFlow()
+
+    private val _usb = MutableStateFlow<UsbOverview?>(null)
+    val usb: StateFlow<UsbOverview?> = _usb.asStateFlow()
 
     private val _events = MutableSharedFlow<HubEvent>(
         replay = 0,
@@ -74,6 +80,19 @@ class StreamHub {
         _events.tryEmit(HubEvent.Camera(value))
     }
 
+    fun publishUsbOverview(value: UsbOverview) {
+        _usb.value = value
+        _events.tryEmit(HubEvent.Usb(value))
+    }
+
+    fun publishUsbEvent(value: UsbEvent) {
+        _events.tryEmit(HubEvent.UsbEventMsg(value))
+    }
+
+    fun publishUsbSerialChunk(value: UsbCollector.SerialChunk) {
+        _events.tryEmit(HubEvent.UsbSerial(value))
+    }
+
     fun sensorSnapshot(): Map<String, SensorReading> = sensorsMap.toMap()
 }
 
@@ -84,4 +103,7 @@ sealed class HubEvent {
     data class Telephony(val reading: TelephonyReading) : HubEvent()
     data class Sensor(val typeName: String, val reading: SensorReading) : HubEvent()
     data class Camera(val meta: CameraMeta) : HubEvent()
+    data class Usb(val overview: UsbOverview) : HubEvent()
+    data class UsbEventMsg(val event: UsbEvent) : HubEvent()
+    data class UsbSerial(val chunk: UsbCollector.SerialChunk) : HubEvent()
 }

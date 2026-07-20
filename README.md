@@ -21,7 +21,10 @@ Full design: [PLAN.md](./PLAN.md)
 | `WS /v1/stream` multiplex (location, battery, sensors, network, …) | Yes |
 | `WS /v1/stream/location`, `/v1/stream/sensors` | Yes |
 | Camera still capture `POST /v1/camera/{id}/capture` + `GET /v1/camera/last.jpg` | Yes |
+| **USB host**: list devices, storage volumes, attach events | Yes (v1.1) |
+| **USB serial** stream into Termux/Ubuntu via WebSocket | Yes (v1.1, CDC/bulk) |
 | Compose UI: permissions, start/stop, live status | Yes |
+| Bluetooth scan / GATT | Planned |
 | Bearer auth / LAN bind | Planned (defaults: localhost, no auth) |
 
 ---
@@ -81,9 +84,33 @@ curl -s http://127.0.0.1:8765/v1/snapshot | jq .
 | GET | `/v1/cameras` | Camera list |
 | POST | `/v1/camera/{id}/capture?base64=1` | Take JPEG |
 | GET | `/v1/camera/last.jpg` | Last JPEG bytes |
-| WS | `/v1/stream?topics=location,battery,sensors,network` | Multiplex stream |
+| GET | `/v1/usb` | USB overview (devices + storage volumes) |
+| GET | `/v1/usb/devices` | Connected USB gadgets |
+| GET | `/v1/usb/storage` | Mounted volumes (OTG paths for proot bind) |
+| POST | `/v1/usb/devices/{id}/permission` | System USB permission dialog |
+| POST | `/v1/usb/devices/{id}/serial/open?baud=115200` | Open bulk/CDC serial |
+| POST | `/v1/usb/devices/{id}/serial/write` | Write to serial |
+| POST | `/v1/usb/devices/{id}/serial/close` | Close serial |
+| WS | `/v1/usb/serial/{id}` | Live serial bytes (base64 + text) |
+| WS | `/v1/stream/usb` | USB attach/detach + overview |
+| WS | `/v1/stream?topics=location,battery,sensors,network,usb` | Multiplex stream |
 | WS | `/v1/stream/location` | Location only |
 | WS | `/v1/stream/sensors` | Sensors only |
+
+### USB → Linux (files + serial)
+
+See **[docs/USB_LINUX.md](./docs/USB_LINUX.md)** for binding flash drives into proot and streaming serial gadgets to Grok/Termux.
+
+```bash
+# Flash drive path for proot --bind
+curl -s http://127.0.0.1:8765/v1/usb/storage | jq .
+
+# Serial gadget
+curl -s http://127.0.0.1:8765/v1/usb/devices | jq .
+curl -s -X POST "http://127.0.0.1:8765/v1/usb/devices/ID/permission"
+curl -s -X POST "http://127.0.0.1:8765/v1/usb/devices/ID/serial/open?baud=115200"
+websocat "ws://127.0.0.1:8765/v1/usb/serial/ID"
+```
 
 ### Capture example
 

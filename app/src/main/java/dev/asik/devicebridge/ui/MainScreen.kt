@@ -48,6 +48,7 @@ fun DeviceBridgeAppUi() {
     val location by BridgeRuntime.hub.location.collectAsState()
     val battery by BridgeRuntime.hub.battery.collectAsState()
     val sensors by BridgeRuntime.hub.sensors.collectAsState()
+    val usb by BridgeRuntime.hub.usb.collectAsState()
 
     val permissionState = rememberMultiplePermissionsState(PermissionHelper.runtimePermissions)
     var capsSummary by remember { mutableStateOf("—") }
@@ -175,6 +176,15 @@ fun DeviceBridgeAppUi() {
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    Text(
+                        "USB: " + (
+                            usb?.let { o ->
+                                "${o.device_count} device(s), ${o.storage_volumes.count { it.is_removable && !it.is_primary }} removable volume(s)"
+                            } ?: "—"
+                            ),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
 
@@ -188,10 +198,13 @@ fun DeviceBridgeAppUi() {
                     Text(
                         """
                         curl -s ${BridgeRuntime.baseUrl()}/v1/health | jq .
-                        curl -s ${BridgeRuntime.baseUrl()}/v1/capabilities | jq .
-                        curl -s ${BridgeRuntime.baseUrl()}/v1/location | jq .
-                        curl -s ${BridgeRuntime.baseUrl()}/v1/snapshot | jq .
-                        curl -s -X POST '${BridgeRuntime.baseUrl()}/v1/camera/0/capture'
+                        curl -s ${BridgeRuntime.baseUrl()}/v1/usb | jq .
+                        curl -s ${BridgeRuntime.baseUrl()}/v1/usb/storage | jq .
+                        # serial gadget (after OTG plug + permission):
+                        curl -s -X POST '${BridgeRuntime.baseUrl()}/v1/usb/devices/DEVICE_ID/permission'
+                        curl -s -X POST '${BridgeRuntime.baseUrl()}/v1/usb/devices/DEVICE_ID/serial/open?baud=115200'
+                        websocat 'ws://127.0.0.1:8765/v1/usb/serial/DEVICE_ID'
+                        # flash drive files: see docs/USB_LINUX.md (bind /storage/XXXX into proot)
                         """.trimIndent(),
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,

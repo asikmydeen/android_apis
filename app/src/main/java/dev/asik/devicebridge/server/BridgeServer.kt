@@ -1,8 +1,10 @@
 package dev.asik.devicebridge.server
 
 import android.content.Context
+import android.util.Base64
 import dev.asik.devicebridge.collectors.CameraCollector
 import dev.asik.devicebridge.collectors.CapabilityScanner
+import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.HubEvent
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.model.ApiError
@@ -25,6 +27,7 @@ import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
@@ -56,6 +59,7 @@ class BridgeServer(
     private val hub: StreamHub,
     private val capabilityScanner: CapabilityScanner,
     private val cameraCollector: CameraCollector,
+    private val usbCollector: UsbCollector,
     private val bindHost: String,
     private val port: Int,
     private val version: String,
@@ -258,12 +262,163 @@ class BridgeServer(
                 }
 
                 post("/v1/control/start") {
-                    // Collectors already managed by service; acknowledge.
                     call.respond(SimpleStatus(true, "collectors active"))
                 }
 
                 post("/v1/control/stop") {
                     call.respond(SimpleStatus(true, "use the app notification or UI to stop the bridge service"))
+                }
+
+                // --- USB host: devices, storage volumes, serial ---
+                get("/v1/usb") {
+                    call.respond(usbCollector.overview())
+                }
+
+                get("/v1/usb/devices") {
+                    call.respond(usbCollector.overview().devices)
+                }
+
+                get("/v1/usb/devices/{id}") {
+                    val id = call.parameters["id"] ?: return@get call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiErrorBody(ApiError("bad_request", "missing device id")),
+                    )
+                    val device = usbCollector.overview().devices.firstOrNull { it.device_id == id }
+                    if (device == null) {
+                        call.respond(
+                            HttpStatusCode.NotFound,
+                            ApiErrorBody(ApiError("not_found", "USB device $id not connected")),
+                        )
+                    } else {
+                        call.respond(device)
+                    }
+                }
+
+                get("/v1/usb/storage") {
+                    call.respond(usbCollector.overview().storage_volumes)
+                }
+
+                post("/v1/usb/devices/{id}/permission") {
+                    val id = call.parameters["id"] ?: return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiErrorBody(ApiError("bad_request", "missing device id")),
+                    )
+                    if (usbCollector.findDevice(id) == null) {
+                        return@post call.respond(
+                            HttpStatusCode.NotFound,
+                            ApiErrorBody(ApiError("not_found", "USB device $id not connected")),
+                        )
+                    }
+                    if (usbCollector.hasPermission(id)) {
+                        call.respond(SimpleStatus(true, "already granted"))
+                    } else {
+                        usbCollector.requestPermission(id)
+                        call.respond(
+                            SimpleStatus(
+                                true,
+                                "permission dialog requested — accept on the phone, then retry serial open",
+                            ),
+                        )
+                    }
+                }
+
+                post("/v1/usb/devices/{id}/serial/open") {
+                    val id = call.parameters["id"] ?: return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiErrorBody(ApiError("bad_request", "missing device id")),
+                    )
+                    val baud = call.request.queryParameters["baud"]?.toIntOrNull() ?: 9600
+                    val result = usbCollector.openSerial(id, baud)
+                    call.respond(
+                        if (result.ok) HttpStatusCode.OK else HttpStatusCode.BadRequest,
+                        result,
+                    )
+                }
+
+                post("/v1/usb/devices/{id}/serial/close") {
+                    val id = call.parameters["id"] ?: return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiErrorBody(ApiError("bad_request", "missing device id")),
+                    )
+                    usbCollector.closeSerial(id)
+                    call.respond(SimpleStatus(true, "serial closed for $id"))
+                }
+
+                post("/v1/usb/devices/{id}/serial/write") {
+                    val id = call.parameters["id"] ?: return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiErrorBody(ApiError("bad_request", "missing device id")),
+                    )
+                    if (!usbCollector.isSerialOpen(id)) {
+                        return@post call.respond(
+                            HttpStatusCode.BadRequest,
+                            ApiErrorBody(ApiError("not_open", "serial not open; POST .../serial/open first")),
+                        )
+                    }
+                    val body = call.receiveText()
+                    val bytes = when {
+                        call.request.queryParameters["encoding"] == "base64" ->
+                            Base64.decode(body.trim(), Base64.DEFAULT)
+                        else -> body.toByteArray(Charsets.UTF_8)
+                    }
+                    try {
+                        val n = usbCollector.writeSerial(id, bytes)
+                        call.respond(SimpleStatus(n >= 0, "wrote $n bytes"))
+                    } catch (e: Exception) {
+                        call.respond(
+                            HttpStatusCode.InternalServerError,
+                            ApiErrorBody(ApiError("write_failed", e.message ?: "write failed")),
+                        )
+                    }
+                }
+
+                webSocket("/v1/usb/serial/{id}") {
+                    val id = call.parameters["id"]
+                    if (id == null) {
+                        return@webSocket
+                    }
+                    sendJson(
+                        StreamEnvelope(
+                            topic = "hello",
+                            ts = TimeUtil.nowIso(),
+                            data = buildJsonObject {
+                                put("device_id", id)
+                                put("hint", "open serial first: POST /v1/usb/devices/$id/serial/open")
+                            },
+                        ),
+                    )
+                    hub.events.filter { it is HubEvent.UsbSerial && it.chunk.deviceId == id }.collect { event ->
+                        val chunk = (event as HubEvent.UsbSerial).chunk
+                        sendJson(
+                            StreamEnvelope(
+                                topic = "usb_serial",
+                                ts = TimeUtil.nowIso(),
+                                data = buildJsonObject {
+                                    put("device_id", chunk.deviceId)
+                                    put("bytes", chunk.bytes)
+                                    put("base64", chunk.base64)
+                                    chunk.text?.let { put("text", it) }
+                                },
+                            ),
+                        )
+                    }
+                }
+
+                webSocket("/v1/stream/usb") {
+                    hub.usb.value?.let {
+                        sendJson(StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
+                    }
+                    hub.events.collect { event ->
+                        when (event) {
+                            is HubEvent.Usb -> sendJson(
+                                StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(event.overview)),
+                            )
+                            is HubEvent.UsbEventMsg -> sendJson(
+                                StreamEnvelope("usb_event", TimeUtil.nowIso(), json.encodeToJsonElement(event.event)),
+                            )
+                            else -> Unit
+                        }
+                    }
                 }
 
                 webSocket("/v1/stream") {
@@ -272,7 +427,7 @@ class BridgeServer(
                         ?.map { it.trim() }
                         ?.filter { it.isNotEmpty() }
                         ?.toMutableSet()
-                        ?: mutableSetOf("location", "battery", "sensors", "network")
+                        ?: mutableSetOf("location", "battery", "sensors", "network", "usb")
 
                     val topics = initial
 
@@ -281,7 +436,7 @@ class BridgeServer(
                             topic = "hello",
                             ts = TimeUtil.nowIso(),
                             data = buildJsonObject {
-                                put("protocol", 1)
+                                put("protocol", 2)
                                 put("server", "device-bridge")
                                 put("topics", JsonPrimitive(topics.joinToString(",")))
                             },
@@ -297,6 +452,9 @@ class BridgeServer(
                     }
                     if ("network" in topics) hub.network.value?.let {
                         sendJson(StreamEnvelope("network", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
+                    }
+                    if ("usb" in topics) hub.usb.value?.let {
+                        sendJson(StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
                     if ("sensors" in topics) {
                         val snap = hub.sensorSnapshot()
@@ -367,6 +525,39 @@ class BridgeServer(
                                             "camera",
                                             TimeUtil.nowIso(),
                                             json.encodeToJsonElement(event.meta),
+                                        ),
+                                    )
+                                }
+                                is HubEvent.Usb -> if ("usb" in topics) {
+                                    sendJson(
+                                        StreamEnvelope(
+                                            "usb",
+                                            TimeUtil.nowIso(),
+                                            json.encodeToJsonElement(event.overview),
+                                        ),
+                                    )
+                                }
+                                is HubEvent.UsbEventMsg -> if ("usb" in topics || "usb_event" in topics) {
+                                    sendJson(
+                                        StreamEnvelope(
+                                            "usb_event",
+                                            TimeUtil.nowIso(),
+                                            json.encodeToJsonElement(event.event),
+                                        ),
+                                    )
+                                }
+                                is HubEvent.UsbSerial -> if ("usb_serial" in topics) {
+                                    val chunk = event.chunk
+                                    sendJson(
+                                        StreamEnvelope(
+                                            "usb_serial",
+                                            TimeUtil.nowIso(),
+                                            buildJsonObject {
+                                                put("device_id", chunk.deviceId)
+                                                put("bytes", chunk.bytes)
+                                                put("base64", chunk.base64)
+                                                chunk.text?.let { put("text", it) }
+                                            },
                                         ),
                                     )
                                 }
@@ -451,6 +642,7 @@ class BridgeServer(
             telephony = hub.telephony.value,
             sensors = hub.sensorSnapshot(),
             camera_meta = hub.cameraMeta.value,
+            usb = hub.usb.value ?: usbCollector.overview(),
             errors = errors,
         )
     }
