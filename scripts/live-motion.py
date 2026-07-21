@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Live motion meter for Device Bridge — shows even micro-movements.
+Live motion UI for Device Bridge — soft, direction-aware, micro-sensitive.
 
-Uses linear acceleration + gyroscope (and optional accel) from the phone API.
-Prefers WebSocket sensor stream; falls back to fast HTTP polling.
+Shows which way the phone is moving (left/right, up/down, toward/away)
+with smooth bars that react to tiny movements.
 
 Usage:
-  export BRIDGE=http://127.0.0.1:8765          # or Tailscale URL
-  export BRIDGE_TOKEN=your_token               # if auth enabled
   python3 scripts/live-motion.py
-
-  python3 scripts/live-motion.py --bridge http://100.x.x.x:8765 --token abc
-  python3 scripts/live-motion.py --http-only   # no websockets
-  python3 scripts/live-motion.py --sensitivity high
+  python3 scripts/live-motion.py --token … --sensitivity ultra
+  python3 scripts/live-motion.py --bridge http://100.x.x.x:8765
 """
 
 from __future__ import annotations
@@ -30,9 +26,26 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse
 
+# ── soft ANSI (no hard blink) ──────────────────────────────────────────────
+RESET = "\033[0m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+# muted pastels that feel calm on dark terminals
+C_SOFT = "\033[38;5;189m"   # soft lavender text
+C_DIM = "\033[38;5;60m"     # quiet gray-blue
+C_GLOW = "\033[38;5;117m"   # gentle cyan glow
+C_WARM = "\033[38;5;180m"   # warm sand
+C_MINT = "\033[38;5;151m"   # mint
+C_ROSE = "\033[38;5;175m"   # soft rose
+C_PEACH = "\033[38;5;216m"
+C_LILAC = "\033[38;5;183m"
+C_SKY = "\033[38;5;153m"
+HIDE_CUR = "\033[?25l"
+SHOW_CUR = "\033[?25h"
+CLEAR = "\033[2J\033[H"
+
 
 def load_token_from_files() -> str:
-    """Optional token files so you don't have to export every time."""
     candidates = [
         os.environ.get("BRIDGE_TOKEN_FILE", ""),
         os.path.expanduser("~/.config/device-bridge/token"),
@@ -53,43 +66,25 @@ def load_token_from_files() -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Live micro-motion display from Device Bridge")
-    p.add_argument(
-        "--bridge",
-        default=os.environ.get("BRIDGE", "http://127.0.0.1:8765"),
-        help="Base URL (default env BRIDGE or http://127.0.0.1:8765)",
-    )
+    p = argparse.ArgumentParser(description="Soft live motion UI for Device Bridge")
+    p.add_argument("--bridge", default=os.environ.get("BRIDGE", "http://127.0.0.1:8765"))
     p.add_argument(
         "--token",
         default=os.environ.get("BRIDGE_TOKEN")
         or os.environ.get("TOKEN")
         or load_token_from_files()
         or "",
-        help="Bearer token (env BRIDGE_TOKEN/TOKEN, or ~/.device-bridge-token)",
     )
-    p.add_argument(
-        "--http-only",
-        action="store_true",
-        help="Force HTTP polling instead of WebSocket",
-    )
-    p.add_argument(
-        "--interval",
-        type=float,
-        default=0.05,
-        help="HTTP poll interval seconds (default 0.05 = 20 Hz)",
-    )
+    p.add_argument("--http-only", action="store_true")
+    p.add_argument("--interval", type=float, default=0.04, help="HTTP poll s (default ~25Hz)")
     p.add_argument(
         "--sensitivity",
         choices=("normal", "high", "ultra"),
-        default="high",
-        help="Display scaling for micro-movements (default high)",
+        default="ultra",
+        help="ultra = micro-movements fill the UI (default)",
     )
-    p.add_argument(
-        "--width",
-        type=int,
-        default=40,
-        help="Bar width in characters",
-    )
+    p.add_argument("--width", type=int, default=21, help="half-width of bidirectional bars")
+    p.add_argument("--no-color", action="store_true")
     return p.parse_args()
 
 
@@ -109,258 +104,445 @@ def http_get_json(url: str, token: str, timeout: float = 2.0) -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def mag(vals: Optional[List[float]]) -> float:
-    if not vals:
-        return 0.0
-    return math.sqrt(sum(float(x) * float(x) for x in vals[:3]))
+def mag3(x: float, y: float, z: float) -> float:
+    return math.sqrt(x * x + y * y + z * z)
 
 
-def bar(value: float, max_v: float, width: int) -> str:
-    if max_v <= 0:
-        max_v = 1.0
-    n = int(max(0.0, min(1.0, value / max_v)) * width)
-    return "█" * n + "░" * (width - n)
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
 
-def sensitivity_scales(level: str) -> Tuple[float, float, float]:
-    """Return (lin_max, gyro_max, activity_max) for bar scaling."""
-    if level == "ultra":
-        return 0.15, 0.15, 0.25  # tiny motion fills the bar
-    if level == "high":
-        return 0.5, 0.4, 0.8
-    return 2.0, 1.5, 3.0  # normal walking/shake scale
+def ema(prev: float, new: float, alpha: float) -> float:
+    return prev * (1.0 - alpha) + new * alpha
 
 
-def extract_from_sensors_map(sensors: Dict[str, Any]) -> Tuple[Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
-    """Find linear, gyro, accel by substring (OEM names vary)."""
+def extract_from_sensors_map(
+    sensors: Dict[str, Any],
+) -> Tuple[Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
     lin = gyro = acc = None
     for key, reading in sensors.items():
         k = key.lower()
         vals = reading.get("values") if isinstance(reading, dict) else None
-        if not vals:
+        if not vals or len(vals) < 3:
             continue
-        if "linear_acceleration" in k or k.endswith("linear"):
+        if "linear_acceleration" in k:
             lin = vals
         elif "gyroscope" in k and "uncalibrat" not in k:
             gyro = vals
-        elif k.endswith("accelerometer") or k.endswith(".accelerometer"):
-            acc = vals
         elif "accelerometer" in k and "linear" not in k and "uncalibrat" not in k:
-            if acc is None:
-                acc = vals
+            acc = vals
     return lin, gyro, acc
+
+
+def scale_for(level: str) -> float:
+    """How many m/s² map to full bar half-width (smaller = more sensitive)."""
+    if level == "ultra":
+        return 0.12
+    if level == "high":
+        return 0.35
+    return 1.2
+
+
+def gyro_scale(level: str) -> float:
+    if level == "ultra":
+        return 0.08
+    if level == "high":
+        return 0.25
+    return 0.8
+
+
+# ── bidirectional soft bar ─────────────────────────────────────────────────
+
+def bipolar_bar(
+    value: float,
+    half: int,
+    full_scale: float,
+    color_neg: str,
+    color_pos: str,
+    color_mid: str,
+    use_color: bool,
+) -> str:
+    """
+    Centered bar:  LEFT ─────●───── RIGHT
+    value < 0 fills left; > 0 fills right. Soft block characters.
+    """
+    if full_scale <= 1e-9:
+        full_scale = 1.0
+    t = clamp(value / full_scale, -1.0, 1.0)
+    # smooth ease for ASMR feel
+    t = math.copysign(abs(t) ** 0.85, t)
+    n = int(round(abs(t) * half))
+    left = ["·"] * half
+    right = ["·"] * half
+    # gradient characters from soft to full
+    blocks = "⣀⣄⣤⣦⣶⣷⣿"
+    for i in range(n):
+        # denser toward the tip (direction of motion)
+        idx = min(len(blocks) - 1, int((i + 1) / max(1, n) * (len(blocks) - 1)))
+        ch = blocks[idx]
+        if t < 0:
+            left[half - 1 - i] = ch
+        else:
+            right[i] = ch
+    mid = "◆" if n > 0 else "◇"
+    if use_color:
+        ls = color_neg + "".join(left) + RESET
+        rs = color_pos + "".join(right) + RESET
+        m = color_mid + mid + RESET
+    else:
+        ls, rs, m = "".join(left), "".join(right), mid
+    return f"{ls}{m}{rs}"
+
+
+def sparkline(hist: Deque[float], width: int, use_color: str) -> str:
+    if not hist:
+        return "·" * width
+    chars = " ˑ˙·░▒▓█"
+    data = list(hist)[-width:]
+    while len(data) < width:
+        data.insert(0, 0.0)
+    mx = max(max(data), 1e-6)
+    out = []
+    for v in data:
+        idx = int(clamp(v / mx, 0, 1) * (len(chars) - 1))
+        out.append(chars[idx])
+    s = "".join(out)
+    return f"{use_color}{s}{RESET}" if use_color else s
 
 
 class MotionState:
     def __init__(self) -> None:
-        self.lin_hist: Deque[float] = deque(maxlen=60)
-        self.gyro_hist: Deque[float] = deque(maxlen=60)
-        self.last_lin: Optional[List[float]] = None
         self.samples = 0
-        self.peak_lin = 0.0
-        self.peak_gyro = 0.0
+        self.t0 = time.time()
+        # smoothed axes (buttery)
+        self.sx = self.sy = self.sz = 0.0
+        self.gx = self.gy = self.gz = 0.0
+        self.activity = 0.0
+        self.last_lin: Optional[List[float]] = None
+        self.trail: Deque[float] = deque(maxlen=48)
+        self.dir_hold = "still"
+        self.dir_hold_until = 0.0
+        self.breath = 0.0  # idle pulse
 
     def update(
         self,
         lin: Optional[List[float]],
         gyro: Optional[List[float]],
         acc: Optional[List[float]],
-    ) -> Dict[str, float]:
-        lm = mag(lin)
-        gm = mag(gyro)
-        am = mag(acc)
+        alpha: float = 0.28,
+    ) -> Dict[str, Any]:
+        lx = ly = lz = 0.0
+        if lin and len(lin) >= 3:
+            lx, ly, lz = float(lin[0]), float(lin[1]), float(lin[2])
+        rx = ry = rz = 0.0
+        if gyro and len(gyro) >= 3:
+            rx, ry, rz = float(gyro[0]), float(gyro[1]), float(gyro[2])
 
-        # Micro-jerk: change in linear accel vector
+        # EMA smooth — ASMR glide
+        self.sx = ema(self.sx, lx, alpha)
+        self.sy = ema(self.sy, ly, alpha)
+        self.sz = ema(self.sz, lz, alpha)
+        self.gx = ema(self.gx, rx, alpha)
+        self.gy = ema(self.gy, ry, alpha)
+        self.gz = ema(self.gz, rz, alpha)
+
         jerk = 0.0
-        if lin and self.last_lin and len(lin) >= 3 and len(self.last_lin) >= 3:
-            jerk = math.sqrt(
-                sum((float(lin[i]) - float(self.last_lin[i])) ** 2 for i in range(3))
+        if lin and self.last_lin and len(lin) >= 3:
+            jerk = mag3(
+                float(lin[0]) - self.last_lin[0],
+                float(lin[1]) - self.last_lin[1],
+                float(lin[2]) - self.last_lin[2],
             )
-        if lin:
-            self.last_lin = [float(x) for x in lin[:3]]
+        if lin and len(lin) >= 3:
+            self.last_lin = [float(lin[0]), float(lin[1]), float(lin[2])]
 
-        # Activity score blends linear + gyro + jerk (sensitive to micro moves)
-        activity = math.sqrt(lm * lm + (gm * 2.0) ** 2 + (jerk * 3.0) ** 2)
-
-        self.lin_hist.append(lm)
-        self.gyro_hist.append(gm)
+        lm = mag3(self.sx, self.sy, self.sz)
+        gm = mag3(self.gx, self.gy, self.gz)
+        activity = math.sqrt(lm * lm + (gm * 1.8) ** 2 + (jerk * 2.5) ** 2)
+        self.activity = ema(self.activity, activity, 0.35)
+        self.trail.append(self.activity)
         self.samples += 1
-        self.peak_lin = max(self.peak_lin, lm)
-        self.peak_gyro = max(self.peak_gyro, gm)
+        self.breath = 0.5 + 0.5 * math.sin(time.time() * 1.4)
 
-        # baseline = quiet floor (10th percentile-ish of recent)
-        def floor(hist: Deque[float]) -> float:
-            if not hist:
-                return 0.0
-            s = sorted(hist)
-            return s[max(0, len(s) // 10)]
-
-        lin_floor = floor(self.lin_hist)
-        # excess over quiet baseline = "you moved"
-        micro = max(0.0, lm - lin_floor * 0.5)
+        am = mag3(*(float(a) for a in acc[:3])) if acc and len(acc) >= 3 else 9.8
 
         return {
+            "sx": self.sx,
+            "sy": self.sy,
+            "sz": self.sz,
+            "gx": self.gx,
+            "gy": self.gy,
+            "gz": self.gz,
             "lin": lm,
             "gyro": gm,
-            "acc": am,
             "jerk": jerk,
-            "activity": activity,
-            "micro": micro,
+            "activity": self.activity,
+            "acc": am,
+            "raw_lin": (lx, ly, lz),
         }
 
 
-def classify(activity: float, lin: float, sensitivity: str) -> str:
-    # thresholds depend on sensitivity
-    if sensitivity == "ultra":
-        t_still, t_micro, t_move, t_shake = 0.02, 0.05, 0.2, 1.0
-    elif sensitivity == "high":
-        t_still, t_micro, t_move, t_shake = 0.05, 0.12, 0.5, 2.5
-    else:
-        t_still, t_micro, t_move, t_shake = 0.15, 0.4, 1.5, 5.0
+def dominant_direction(sx: float, sy: float, sz: float, thr: float) -> Tuple[str, str]:
+    """
+    Phone coords (screen facing you, portrait):
+      +X right, -X left
+      +Y up (top of phone), -Y down
+      +Z toward you (out of screen), -Z away (into table)
+    """
+    ax, ay, az = abs(sx), abs(sy), abs(sz)
+    m = max(ax, ay, az)
+    if m < thr:
+        return "still", "quietly resting…"
 
-    if activity < t_still and lin < t_still:
-        return "STILL"
-    if activity < t_micro:
-        return "MICRO"
-    if activity < t_move:
-        return "MOVE"
-    if activity < t_shake:
-        return "ACTIVE"
-    return "SHAKE"
+    if ax >= ay and ax >= az:
+        if sx > 0:
+            return "right", "soft drift  →  right"
+        return "left", "soft drift  ←  left"
+    if ay >= ax and ay >= az:
+        if sy > 0:
+            return "up", "lifting  ↑  toward sky / top"
+        return "down", "settling  ↓  toward ground"
+    if sz > 0:
+        return "toward", "drawing  ◎  toward you"
+    return "away", "pressing  ○  into the world"
+
+
+def mood_line(label: str, activity: float, breath: float) -> str:
+    if label == "still":
+        dots = "·" * (3 + int(breath * 3))
+        return f"still space  {dots}"
+    if activity < 0.08:
+        return "a whisper of motion…"
+    if activity < 0.25:
+        return "gentle sway…"
+    if activity < 0.8:
+        return "clear movement…"
+    if activity < 2.0:
+        return "alive · flowing…"
+    return "rush · cascade…"
+
+
+def phone_glyph(sx: float, sy: float, sz: float, scale: float) -> List[str]:
+    """Tiny 7x5 ASCII phone that leans with motion."""
+    # map motion to cursor offset inside a small field
+    cx, cy = 5, 2
+    dx = int(clamp(sx / scale, -1, 1) * 3)
+    dy = int(clamp(-sy / scale, -1, 1) * 1)  # up is -row
+    px, py = cx + dx, cy + dy
+    rows = [[" " for _ in range(11)] for _ in range(5)]
+    # soft field dots
+    for y in range(5):
+        for x in range(11):
+            if (x + y) % 2 == 0:
+                rows[y][x] = "·"
+    # phone body
+    body = [
+        "╭───╮",
+        "│ · │",
+        "│   │",
+        "╰───╯",
+    ]
+    # place body centered at px,py
+    for i, line in enumerate(body):
+        yy = clamp(py - 1 + i, 0, 4)
+        for j, ch in enumerate(line):
+            xx = clamp(px - 2 + j, 0, 10)
+            if 0 <= int(yy) < 5 and 0 <= int(xx) < 11:
+                rows[int(yy)][int(xx)] = ch
+    # motion comet
+    if abs(sx) + abs(sy) + abs(sz) > scale * 0.15:
+        tx = clamp(px + (1 if sx > 0 else -1 if sx < 0 else 0), 0, 10)
+        ty = clamp(py + (-1 if sy > 0 else 1 if sy < 0 else 0), 0, 4)
+        rows[int(ty)][int(tx)] = "✦"
+    return ["".join(r) for r in rows]
 
 
 def render(
-    metrics: Dict[str, float],
+    metrics: Dict[str, Any],
     state: MotionState,
-    width: int,
+    half: int,
     sensitivity: str,
     source: str,
+    use_color: bool,
 ) -> str:
-    lin_max, gyro_max, act_max = sensitivity_scales(sensitivity)
-    label = classify(metrics["activity"], metrics["lin"], sensitivity)
-    emoji = {
-        "STILL": "·",
-        "MICRO": "~",
-        "MOVE": "→",
-        "ACTIVE": "⚡",
-        "SHAKE": "💥",
-    }.get(label, "?")
+    sc = scale_for(sensitivity)
+    gsc = gyro_scale(sensitivity)
+    thr = sc * 0.12
+
+    sx, sy, sz = metrics["sx"], metrics["sy"], metrics["sz"]
+    key, phrase = dominant_direction(sx, sy, sz, thr)
+
+    # hold direction label briefly so it doesn't flicker (ASMRy stability)
+    now = time.time()
+    if key != "still":
+        state.dir_hold = key
+        state.dir_hold_until = now + 0.35
+    elif now > state.dir_hold_until:
+        state.dir_hold = "still"
+        phrase = "quietly resting…"
+    else:
+        # keep last phrase-ish
+        key = state.dir_hold
+        _, phrase = dominant_direction(sx, sy, sz, thr * 0.5)
+        if key == "still":
+            phrase = "quietly resting…"
+
+    def c(code: str) -> str:
+        return "" if not use_color else code
+
+    def bipolar(val: float, cn: str, cp: str) -> str:
+        return bipolar_bar(
+            val, half, sc, c(cn), c(cp), c(C_SOFT), use_color
+        )
+
+    lr = bipolar(sx, C_ROSE, C_SKY)
+    ud = bipolar(sy, C_PEACH, C_MINT)
+    za = bipolar(sz, C_LILAC, C_GLOW)
+
+    # gyro yaw-ish (z) for twist
+    twist = bipolar_bar(state.gz, half, gsc, c(C_WARM), c(C_LILAC), c(C_SOFT), use_color)
+
+    glyph = phone_glyph(sx, sy, sz, sc)
+    mood = mood_line(key if metrics["activity"] >= thr else "still", metrics["activity"], state.breath)
+    trail = sparkline(state.trail, half * 2 + 1, c(C_DIM) if use_color else "")
+
+    # direction compass line
+    compass = {
+        "still": f"        {c(C_DIM)}· quiet ·{RESET if use_color else ''}",
+        "left": f"   {c(C_ROSE)}◀ LEFT{RESET if use_color else 'LEFT'}     ",
+        "right": f"        {c(C_SKY)}RIGHT ▶{RESET if use_color else 'RIGHT'}",
+        "up": f"     {c(C_MINT)}▲ UP{RESET if use_color else 'UP'}      ",
+        "down": f"    {c(C_PEACH)}▼ DOWN{RESET if use_color else 'DOWN'}    ",
+        "toward": f"   {c(C_GLOW)}◎ toward you{RESET if use_color else 'toward'}",
+        "away": f"   {c(C_LILAC)}○ into world{RESET if use_color else 'away'}",
+    }.get(key, "")
+
+    elapsed = int(time.time() - state.t0)
+    title = f"{c(BOLD)}{c(C_SOFT)}motion veil{RESET if use_color else 'motion veil'}"
+    meta = (
+        f"{c(C_DIM)}[{source}]  n={state.samples}  {sensitivity}  t={elapsed}s  "
+        f"act={metrics['activity']:.3f}{RESET if use_color else ''}"
+    )
+
+    # build soft frame
+    w = half * 2 + 14
+    edge = "─" * min(48, w)
 
     lines = [
-        f"\033[2J\033[H",  # clear screen
-        f"Device Bridge live motion  [{source}]  samples={state.samples}  sens={sensitivity}",
+        CLEAR + HIDE_CUR,
+        f"  {title}  {meta}",
+        f"  {c(C_DIM)}{edge}{RESET if use_color else ''}",
         f"",
-        f"  {emoji}  {label:6}   activity={metrics['activity']:.4f}",
+        f"  {c(C_WARM)}{phrase}{RESET if use_color else phrase}",
+        f"  {compass}",
+        f"  {c(C_DIM)}{mood}{RESET if use_color else mood}",
         f"",
-        f"  linear   {metrics['lin']:8.4f} m/s²  {bar(metrics['lin'], lin_max, width)}",
-        f"  micro    {metrics['micro']:8.4f}       {bar(metrics['micro'], lin_max, width)}",
-        f"  jerk     {metrics['jerk']:8.4f}       {bar(metrics['jerk'], lin_max, width)}",
-        f"  gyro     {metrics['gyro']:8.4f} rad/s {bar(metrics['gyro'], gyro_max, width)}",
-        f"  |accel|  {metrics['acc']:8.4f} m/s²  (≈9.8 when still in gravity)",
+        f"  {c(C_DIM)}left ←{RESET if use_color else 'left'}  {lr}  {c(C_DIM)}→ right{RESET if use_color else 'right'}",
+        f"  {c(C_DIM)}down ←{RESET if use_color else 'down'}  {ud}  {c(C_DIM)}→ up{RESET if use_color else 'up'}",
+        f"  {c(C_DIM)}away ←{RESET if use_color else 'away'}  {za}  {c(C_DIM)}→ toward you{RESET if use_color else 'toward'}",
+        f"  {c(C_DIM)}twist{RESET if use_color else 'twist'}  {twist}",
         f"",
-        f"  peaks    lin={state.peak_lin:.4f}  gyro={state.peak_gyro:.4f}",
+        f"  {c(C_DIM)}flow {trail}{RESET if use_color else ''}",
         f"",
-        f"  STILL=no motion  MICRO=tiny  MOVE=clear  ACTIVE=strong  SHAKE=violent",
-        f"  Tip: rest phone → STILL; nudge slightly → MICRO; walk/wave → MOVE/SHAKE",
-        f"  Ctrl+C to quit",
     ]
-    return "\n".join(lines)
+    for row in glyph:
+        lines.append(f"       {c(C_GLOW)}{row}{RESET if use_color else row}")
+    lines += [
+        f"",
+        f"  {c(C_DIM)}x={sx:+.3f}  y={sy:+.3f}  z={sz:+.3f}  m/s² (smoothed linear){RESET if use_color else ''}",
+        f"  {c(C_DIM)}|a|={metrics['acc']:.2f} (gravity~9.8)  gyro={metrics['gyro']:.3f}{RESET if use_color else ''}",
+        f"",
+        f"  {c(C_DIM)}nudge · breathe · tilt — micro moves light the bars{RESET if use_color else ''}",
+        f"  {c(C_DIM)}Ctrl+C to leave quietly{RESET if use_color else 'Ctrl+C quit'}",
+    ]
+    return "\n".join(lines) + SHOW_CUR
 
 
-def run_http(bridge: str, token: str, interval: float, width: int, sensitivity: str) -> None:
+def run_http(
+    bridge: str,
+    token: str,
+    interval: float,
+    half: int,
+    sensitivity: str,
+    use_color: bool,
+) -> None:
     state = MotionState()
     url = bridge.rstrip("/") + "/v1/sensors"
-    print("HTTP polling", url, f"every {interval}s …", file=sys.stderr)
+    print(f"{DIM}soft polling {url}{RESET}", file=sys.stderr)
     while True:
         try:
             data = http_get_json(url, token, timeout=max(1.0, interval * 4))
             if not isinstance(data, dict):
                 time.sleep(interval)
                 continue
-            # sensors endpoint returns map of type -> reading
             lin, gyro, acc = extract_from_sensors_map(data)
             metrics = state.update(lin, gyro, acc)
-            sys.stdout.write(render(metrics, state, width, sensitivity, "HTTP"))
+            sys.stdout.write(render(metrics, state, half, sensitivity, "live", use_color))
             sys.stdout.flush()
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
-            sys.stdout.write(f"\033[2J\033[H  waiting for bridge… ({e})\n")
+            sys.stdout.write(f"{CLEAR}  waiting for bridge… {e}\n")
             sys.stdout.flush()
             time.sleep(1.0)
             continue
         time.sleep(interval)
 
 
-def run_websocket(bridge: str, token: str, width: int, sensitivity: str) -> None:
+def run_websocket(
+    bridge: str,
+    token: str,
+    half: int,
+    sensitivity: str,
+    use_color: bool,
+) -> None:
     try:
-        import websocket  # type: ignore  # websocket-client
-    except ImportError:
-        raise RuntimeError("websocket-client not installed")
+        import websocket  # type: ignore
+    except ImportError as e:
+        raise RuntimeError("websocket-client not installed") from e
 
-    # build ws URL
     parsed = urlparse(bridge)
     scheme = "wss" if parsed.scheme == "https" else "ws"
-    netloc = parsed.netloc
-    path = "/v1/stream/sensors"
     q = urlencode({"token": token}) if token else ""
-    ws_url = urlunparse((scheme, netloc, path, "", q, ""))
+    ws_url = urlunparse((scheme, parsed.netloc, "/v1/stream/sensors", "", q, ""))
 
     state = MotionState()
-    # latest partial map from streaming individual sensors
     latest: Dict[str, Any] = {}
+    print(f"{DIM}soft stream {ws_url}{RESET}", file=sys.stderr)
 
-    print("WebSocket", ws_url, file=sys.stderr)
+    def paint() -> None:
+        lin, gyro, acc = extract_from_sensors_map(latest)
+        if lin is None and gyro is None and acc is None:
+            return
+        metrics = state.update(lin, gyro, acc)
+        sys.stdout.write(render(metrics, state, half, sensitivity, "stream", use_color))
+        sys.stdout.flush()
 
     def on_message(_ws: Any, message: str) -> None:
         try:
             env = json.loads(message)
         except json.JSONDecodeError:
             return
-        if env.get("topic") not in ("sensors", "sensor"):
-            # hello etc.
-            if env.get("topic") == "hello":
-                return
-            # stream envelope with sensor map in data
         data = env.get("data")
         if not isinstance(data, dict):
             return
-        # data may be { "android.sensor.x": {values:...}, ... } or single
         for k, v in data.items():
             if isinstance(v, dict) and "values" in v:
                 latest[k] = v
-            elif k == "values" and isinstance(data.get("values"), list):
-                # single reading shape unlikely
-                pass
-        if not latest:
-            # maybe whole map is type -> reading
+        if any("values" in (v or {}) for v in data.values() if isinstance(v, dict)):
+            paint()
+        else:
+            # full map
             lin, gyro, acc = extract_from_sensors_map(data)
-            if lin is None and gyro is None and acc is None:
-                return
-            metrics = state.update(lin, gyro, acc)
-            sys.stdout.write(render(metrics, state, width, sensitivity, "WS"))
-            sys.stdout.flush()
-            return
+            if lin or gyro or acc:
+                metrics = state.update(lin, gyro, acc)
+                sys.stdout.write(render(metrics, state, half, sensitivity, "stream", use_color))
+                sys.stdout.flush()
 
-        lin, gyro, acc = extract_from_sensors_map(latest)
-        metrics = state.update(lin, gyro, acc)
-        sys.stdout.write(render(metrics, state, width, sensitivity, "WS"))
-        sys.stdout.flush()
-
-    def on_error(_ws: Any, error: Any) -> None:
-        print(f"WS error: {error}", file=sys.stderr)
-
-    def on_close(_ws: Any, *args: Any) -> None:
-        print("WS closed", file=sys.stderr)
-
-    headers = []
-    if token:
-        headers.append(f"Authorization: Bearer {token}")
-
+    headers = [f"Authorization: Bearer {token}"] if token else []
     ws = websocket.WebSocketApp(
         ws_url,
         header=headers,
         on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
+        on_error=lambda _w, err: print(f"WS {err}", file=sys.stderr),
     )
     ws.run_forever(ping_interval=20, ping_timeout=10)
 
@@ -369,16 +551,17 @@ def main() -> int:
     args = parse_args()
     bridge = args.bridge.rstrip("/")
     token = args.token
+    use_color = not args.no_color and sys.stdout.isatty()
+    half = max(9, args.width)
 
     def try_health(tok: str) -> Any:
         return http_get_json(bridge + "/v1/health", tok, timeout=3.0)
 
     def prompt_token(reason: str) -> str:
         print(reason, file=sys.stderr)
-        print("Device Bridge app → Remote tab → copy token", file=sys.stderr)
-        # getpass hides input; also offer visible fallback if empty
+        print("Device Bridge → Remote → copy token", file=sys.stderr)
         try:
-            tok = getpass.getpass("Token (input hidden): ").strip()
+            tok = getpass.getpass("Token (hidden): ").strip()
         except (EOFError, KeyboardInterrupt):
             print("", file=sys.stderr)
             return ""
@@ -386,7 +569,6 @@ def main() -> int:
             try:
                 tok = input("Token (visible): ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("", file=sys.stderr)
                 return ""
         return tok
 
@@ -395,31 +577,26 @@ def main() -> int:
         if not tok or os.path.isfile(path):
             return
         try:
-            ans = input(f"Save token to {path} for next time? [y/N] ").strip().lower()
+            ans = input(f"Save token to {path}? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print("", file=sys.stderr)
             return
         if ans in ("y", "yes"):
             try:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(tok + "\n")
                 os.chmod(path, 0o600)
                 print(f"Saved {path}", file=sys.stderr)
             except OSError as ex:
-                print(f"Could not save token: {ex}", file=sys.stderr)
+                print(f"Could not save: {ex}", file=sys.stderr)
 
-    # quick health check — prompt for token on 401 or if none provided after a failed try
     health = None
     try:
         health = try_health(token)
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            token = prompt_token(
-                "Auth required (HTTP 401). Paste token from the app Remote tab."
-            )
+            token = prompt_token("Auth required (401).")
             if not token:
-                print("No token entered.", file=sys.stderr)
+                print("No token.", file=sys.stderr)
                 return 1
             try:
                 health = try_health(token)
@@ -427,40 +604,32 @@ def main() -> int:
                 print(f"Still cannot auth: {e2}", file=sys.stderr)
                 return 1
             maybe_save_token(token)
-            # keep for this process (WS/HTTP use `token`)
         else:
-            print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
+            print(f"Cannot reach health: {e}", file=sys.stderr)
             return 1
     except Exception as e:
-        # connection error — still offer token if they forgot and server needs it later
         print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
-        print("Is Device Bridge started? Try: curl -s http://127.0.0.1:8765/", file=sys.stderr)
+        print("Start Device Bridge, then retry.", file=sys.stderr)
         return 1
-
-    if health is None:
-        return 1
-
-    if not token:
-        # Public health without auth — ask only if user wants remote later; fine for local
-        pass
 
     print(
-        f"Bridge OK version={health.get('version')} degraded={health.get('degraded')}"
-        + (" auth=on" if token else " auth=off/local"),
+        f"Bridge OK v{health.get('version')}  "
+        f"{'degraded' if health.get('degraded') else 'smooth'}  "
+        f"sensitivity={args.sensitivity}",
         file=sys.stderr,
     )
 
-    if not args.http_only:
-        try:
-            run_websocket(bridge, token, args.width, args.sensitivity)
-            return 0
-        except Exception as e:
-            print(f"WebSocket unavailable ({e}); falling back to HTTP…", file=sys.stderr)
-
     try:
-        run_http(bridge, token, args.interval, args.width, args.sensitivity)
+        if not args.http_only:
+            try:
+                run_websocket(bridge, token, half, args.sensitivity, use_color)
+                return 0
+            except Exception as e:
+                print(f"WebSocket skip ({e}); HTTP…", file=sys.stderr)
+        run_http(bridge, token, args.interval, half, args.sensitivity, use_color)
     except KeyboardInterrupt:
-        print("\nbye", file=sys.stderr)
+        sys.stdout.write(SHOW_CUR + "\n  bye · soft exit\n")
+        sys.stdout.flush()
     return 0
 
 
