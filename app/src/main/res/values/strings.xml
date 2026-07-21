@@ -6,4 +6,16 @@
     <string name="notification_title">Device Bridge active</string>
     <string name="notification_text">API at http://127.0.0.1:8765</string>
     <string name="notification_stop">Stop</string>
+
+    <string name="theme_title">Appearance</string>
+    <string name="theme_system">System Default</string>
+    <string name="theme_light">Light Mode</string>
+    <string name="theme_dark">Dark Mode</string>
+
+    <string name="master_toggle_start">Start Bridge Service</string>
+    <string name="master_toggle_stop">Stop Bridge Service</string>
+
+    <string name="keep_alive_title">Service Protection &amp; Keep-Alive</string>
+    <string name="keep_awake_label">Keep CPU &amp; Wi-Fi Awake</string>
+    <string name="keep_awake_desc">Acquires WakeLock while active to prevent connections from dropping when screen is off.</string>
 </resources>

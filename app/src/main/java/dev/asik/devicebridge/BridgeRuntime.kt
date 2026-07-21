@@ -1,6 +1,7 @@
 package dev.asik.devicebridge
 
 import android.content.Context
+import dev.asik.devicebridge.collectors.AudioCollector
 import dev.asik.devicebridge.collectors.BatteryCollector
 import dev.asik.devicebridge.collectors.CameraCollector
 import dev.asik.devicebridge.collectors.CapabilityScanner
@@ -50,6 +51,8 @@ object BridgeRuntime {
         private set
     lateinit var telephonyCollector: TelephonyCollector
         private set
+    lateinit var audioCollector: AudioCollector
+        private set
     lateinit var cameraCollector: CameraCollector
         private set
     lateinit var usbCollector: UsbCollector
@@ -85,6 +88,7 @@ object BridgeRuntime {
         locationCollector = LocationCollector(app, hub)
         networkCollector = NetworkCollector(app, hub)
         telephonyCollector = TelephonyCollector(app, hub, scope)
+        audioCollector = AudioCollector(app, hub, scope)
         cameraCollector = CameraCollector(app, hub)
         usbCollector = UsbCollector(app, hub, scope)
         refreshNetworkConfigFromPrefs()
@@ -164,6 +168,7 @@ object BridgeRuntime {
         batteryCollector.start()
         if (BridgePrefs.streamSensors(ctx)) sensorCollector.start()
         if (BridgePrefs.streamLocation(ctx)) locationCollector.start()
+        if (BridgePrefs.streamAudio(ctx)) audioCollector.start()
         networkCollector.start()
         telephonyCollector.start()
         if (BridgePrefs.streamUsb(ctx)) usbCollector.start()
@@ -173,6 +178,7 @@ object BridgeRuntime {
         batteryCollector.stop()
         sensorCollector.stop()
         locationCollector.stop()
+        audioCollector.stop()
         networkCollector.stop()
         telephonyCollector.stop()
         usbCollector.stop()

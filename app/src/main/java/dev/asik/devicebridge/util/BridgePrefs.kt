@@ -1,7 +1,16 @@
 package dev.asik.devicebridge.util
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
+
+enum class ThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK
+}
 
 enum class NetworkMode {
     /** Bind 127.0.0.1 only — Termux/Ubuntu on device */
@@ -20,6 +29,8 @@ enum class NetworkMode {
 object BridgePrefs {
     private const val NAME = "device_bridge_prefs"
     private const val KEY_START_ON_BOOT = "start_on_boot"
+    private const val KEY_THEME_MODE = "theme_mode"
+    private const val KEY_KEEP_AWAKE = "keep_awake"
     private const val KEY_NETWORK_MODE = "network_mode"
     private const val KEY_BIND_HOST = "bind_host"
     private const val KEY_PORT = "port"
@@ -28,10 +39,38 @@ object BridgePrefs {
     private const val KEY_PUBLIC_URL = "public_url"
     private const val KEY_STREAM_LOCATION = "stream_location"
     private const val KEY_STREAM_SENSORS = "stream_sensors"
+    private const val KEY_STREAM_AUDIO = "stream_audio"
     private const val KEY_STREAM_USB = "stream_usb"
+
+    private val _themeModeFlow = MutableStateFlow(ThemeMode.SYSTEM)
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+    fun themeMode(context: Context): ThemeMode {
+        val raw = prefs(context).getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name)
+        val mode = runCatching { ThemeMode.valueOf(raw ?: ThemeMode.SYSTEM.name) }
+            .getOrDefault(ThemeMode.SYSTEM)
+        _themeModeFlow.value = mode
+        return mode
+    }
+
+    fun setThemeMode(context: Context, mode: ThemeMode) {
+        prefs(context).edit().putString(KEY_THEME_MODE, mode.name).apply()
+        _themeModeFlow.value = mode
+    }
+
+    fun themeModeFlow(context: Context): StateFlow<ThemeMode> {
+        themeMode(context)
+        return _themeModeFlow.asStateFlow()
+    }
+
+    fun keepAwake(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_KEEP_AWAKE, true)
+
+    fun setKeepAwake(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_KEEP_AWAKE, enabled).apply()
+    }
 
     fun startOnBoot(context: Context): Boolean =
         prefs(context).getBoolean(KEY_START_ON_BOOT, false)
@@ -123,6 +162,13 @@ object BridgePrefs {
 
     fun setStreamSensors(context: Context, v: Boolean) {
         prefs(context).edit().putBoolean(KEY_STREAM_SENSORS, v).apply()
+    }
+
+    fun streamAudio(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STREAM_AUDIO, false)
+
+    fun setStreamAudio(context: Context, v: Boolean) {
+        prefs(context).edit().putBoolean(KEY_STREAM_AUDIO, v).apply()
     }
 
     fun streamUsb(context: Context): Boolean =

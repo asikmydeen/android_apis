@@ -1,6 +1,7 @@
 package dev.asik.devicebridge.hub
 
 import dev.asik.devicebridge.collectors.UsbCollector
+import dev.asik.devicebridge.model.AudioReading
 import dev.asik.devicebridge.model.BatteryReading
 import dev.asik.devicebridge.model.CameraMeta
 import dev.asik.devicebridge.model.LocationReading
@@ -32,6 +33,9 @@ class StreamHub {
 
     private val _telephony = MutableStateFlow<TelephonyReading?>(null)
     val telephony: StateFlow<TelephonyReading?> = _telephony.asStateFlow()
+
+    private val _audio = MutableStateFlow<AudioReading?>(null)
+    val audio: StateFlow<AudioReading?> = _audio.asStateFlow()
 
     private val sensorsMap = ConcurrentHashMap<String, SensorReading>()
     private val _sensors = MutableStateFlow<Map<String, SensorReading>>(emptyMap())
@@ -69,6 +73,11 @@ class StreamHub {
         _events.tryEmit(HubEvent.Telephony(value))
     }
 
+    fun publishAudio(value: AudioReading) {
+        _audio.value = value
+        _events.tryEmit(HubEvent.Audio(value))
+    }
+
     fun publishSensor(typeName: String, value: SensorReading) {
         sensorsMap[typeName] = value
         _sensors.value = sensorsMap.toMap()
@@ -101,6 +110,7 @@ sealed class HubEvent {
     data class Battery(val reading: BatteryReading) : HubEvent()
     data class Network(val reading: NetworkReading) : HubEvent()
     data class Telephony(val reading: TelephonyReading) : HubEvent()
+    data class Audio(val reading: AudioReading) : HubEvent()
     data class Sensor(val typeName: String, val reading: SensorReading) : HubEvent()
     data class Camera(val meta: CameraMeta) : HubEvent()
     data class Usb(val overview: UsbOverview) : HubEvent()

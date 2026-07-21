@@ -182,6 +182,13 @@ data class TelephonyReading(
 )
 
 @Serializable
+data class AudioReading(
+    val rms_db: Float,
+    val peak_db: Float,
+    val time_ms: Long? = null,
+)
+
+@Serializable
 data class SensorReading(
     val values: List<Float>,
     val accuracy: Int,
@@ -287,6 +294,7 @@ data class DeviceSnapshot(
     val battery: BatteryReading? = null,
     val network: NetworkReading? = null,
     val telephony: TelephonyReading? = null,
+    val audio: AudioReading? = null,
     val sensors: Map<String, SensorReading> = emptyMap(),
     val camera_meta: CameraMeta? = null,
     val usb: UsbOverview? = null,

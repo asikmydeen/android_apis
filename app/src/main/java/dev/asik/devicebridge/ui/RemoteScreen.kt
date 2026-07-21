@@ -11,9 +11,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -39,6 +46,7 @@ import dev.asik.devicebridge.util.NetworkMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RemoteScreen() {
     val context = LocalContext.current
@@ -72,58 +80,90 @@ fun RemoteScreen() {
         }
     }
 
+    val modes = listOf(NetworkMode.LOCAL, NetworkMode.LAN, NetworkMode.TAILSCALE, NetworkMode.CLOUDFLARE)
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Remote access", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Remote Access", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(
-            "Pick how clients reach this phone. Non-local modes force a secret token.",
+            "Pick how external or local clients reach this bridge API.",
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Network mode", style = MaterialTheme.typography.titleMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ModeChip("Local", mode == NetworkMode.LOCAL) { applyMode(NetworkMode.LOCAL) }
-                    ModeChip("LAN", mode == NetworkMode.LAN) { applyMode(NetworkMode.LAN) }
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Network Mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    modes.forEachIndexed { index, m ->
+                        SegmentedButton(
+                            selected = mode == m,
+                            onClick = { applyMode(m) },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
+                            label = {
+                                Text(
+                                    when (m) {
+                                        NetworkMode.LOCAL -> "Local"
+                                        NetworkMode.LAN -> "LAN"
+                                        NetworkMode.TAILSCALE -> "Tailscale"
+                                        NetworkMode.CLOUDFLARE -> "Cloudflare"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+                        )
+                    }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ModeChip("Tailscale", mode == NetworkMode.TAILSCALE) { applyMode(NetworkMode.TAILSCALE) }
-                    ModeChip("Cloudflare", mode == NetworkMode.CLOUDFLARE) { applyMode(NetworkMode.CLOUDFLARE) }
-                }
+
                 Text(
                     when (mode) {
-                        NetworkMode.LOCAL -> "Bind 127.0.0.1 — only on-device (Termux/Ubuntu). Safest."
-                        NetworkMode.LAN -> "Bind 0.0.0.0 — phones/PCs on same Wi‑Fi. Token required."
-                        NetworkMode.TAILSCALE -> "Bind 0.0.0.0 — use Tailscale IP from any of your devices. Token required."
-                        NetworkMode.CLOUDFLARE -> "Bind 127.0.0.1 — run cloudflared in Termux for a public HTTPS URL. Token required."
+                        NetworkMode.LOCAL -> "Binds 127.0.0.1 — on-device only (Termux/Ubuntu). Safest mode."
+                        NetworkMode.LAN -> "Binds 0.0.0.0 — accessible on local Wi-Fi. Bearer token required."
+                        NetworkMode.TAILSCALE -> "Binds 0.0.0.0 — accessible via Tailscale IP across your tailnet. Bearer token required."
+                        NetworkMode.CLOUDFLARE -> "Binds 127.0.0.1 — forward with cloudflared in Termux for public HTTPS access. Bearer token required."
                     },
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp)
+        ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Access token", style = MaterialTheme.typography.titleMedium)
+                Text("Access Token", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    if (BridgePrefs.authEnabled(context)) "Auth ON — send as Bearer header or ?token="
-                    else "Auth off (local mode only)",
+                    if (BridgePrefs.authEnabled(context)) "Auth ENABLED — send Bearer token in header or ?token="
+                    else "Auth OFF (allowed in Local mode only)",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Text(token, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    token,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = {
                             copy(context, token)
                             Toast.makeText(context, "Token copied", Toast.LENGTH_SHORT).show()
                         },
-                    ) { Text("Copy token") }
+                    ) { Text("Copy Token") }
                     Button(
                         onClick = {
                             token = BridgePrefs.rotateToken(context)
@@ -134,11 +174,6 @@ fun RemoteScreen() {
                         },
                     ) { Text("Rotate") }
                 }
-                Text(
-                    "curl -s -H \"Authorization: Bearer $token\" http://127.0.0.1:$port/v1/health",
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.labelSmall,
-                )
             }
         }
 

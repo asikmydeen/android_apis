@@ -12,6 +12,7 @@ object PermissionHelper {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
             add(Manifest.permission.CAMERA)
+            add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.BODY_SENSORS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(Manifest.permission.ACTIVITY_RECOGNITION)

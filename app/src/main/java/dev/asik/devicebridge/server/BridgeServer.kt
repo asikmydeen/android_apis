@@ -9,6 +9,7 @@ import dev.asik.devicebridge.hub.HubEvent
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.model.ApiError
 import dev.asik.devicebridge.model.ApiErrorBody
+import dev.asik.devicebridge.model.AudioReading
 import dev.asik.devicebridge.model.ClientControlMessage
 import dev.asik.devicebridge.model.ConfigResponse
 import dev.asik.devicebridge.model.DeviceSnapshot
@@ -41,6 +42,7 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import io.ktor.server.websocket.DefaultWebSocketServerSession
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
 import io.ktor.websocket.Frame
@@ -90,10 +92,7 @@ class BridgeServer(
             install(ContentNegotiation) {
                 json(json)
             }
-            install(WebSockets) {
-                pingPeriod = Duration.ofSeconds(20)
-                timeout = Duration.ofSeconds(30)
-            }
+            install(WebSockets)
             install(StatusPages) {
                 exception<Throwable> { call, cause ->
                     call.respond(
@@ -150,7 +149,7 @@ class BridgeServer(
                 get("/v1/health") {
                     val started = startedAtMsProvider()
                     val uptime = if (started > 0) (System.currentTimeMillis() - started) / 1000 else 0
-                    val diag = runCatching { DiagnosticsBuilder.build(context) }.getOrNull()
+                    val diag = runCatching { DiagnosticsBuilder.build(this@BridgeServer.context) }.getOrNull()
                     call.respond(
                         HealthResponse(
                             ok = diag?.ok ?: true,
@@ -164,7 +163,7 @@ class BridgeServer(
                 }
 
                 get("/v1/diagnostics") {
-                    call.respond(DiagnosticsBuilder.build(context))
+                    call.respond(DiagnosticsBuilder.build(this@BridgeServer.context))
                 }
 
                 get("/v1/debug/log") {
@@ -220,7 +219,7 @@ class BridgeServer(
                 get("/v1/location") {
                     val loc = DiagnosticsBuilder.enrichLocation(hub.location.value)
                     if (loc == null) {
-                        if (!PermissionHelper.hasLocation(context)) {
+                        if (!PermissionHelper.hasLocation(this@BridgeServer.context)) {
                             call.respondPermissionDenied("ACCESS_FINE_LOCATION")
                         } else {
                             call.respond(
@@ -275,6 +274,18 @@ class BridgeServer(
                     }
                 }
 
+                get("/v1/audio") {
+                    val a = hub.audio.value
+                    if (a == null) {
+                        call.respond(
+                            HttpStatusCode.ServiceUnavailable,
+                            ApiErrorBody(ApiError("no_data", "Audio reading not available yet. Enable it in Settings.")),
+                        )
+                    } else {
+                        call.respond(a)
+                    }
+                }
+
                 get("/v1/sensors") {
                     call.respond(hub.sensorSnapshot())
                 }
@@ -305,7 +316,7 @@ class BridgeServer(
                 }
 
                 post("/v1/camera/{id}/capture") {
-                    if (!PermissionHelper.hasCamera(context)) {
+                    if (!PermissionHelper.hasCamera(this@BridgeServer.context)) {
                         return@post call.respondPermissionDenied("CAMERA")
                     }
                     val id = call.parameters["id"] ?: return@post call.respond(
@@ -507,7 +518,7 @@ class BridgeServer(
                         ?.map { it.trim() }
                         ?.filter { it.isNotEmpty() }
                         ?.toMutableSet()
-                        ?: mutableSetOf("location", "battery", "sensors", "network", "usb")
+                        ?: mutableSetOf("location", "battery", "sensors", "network", "usb", "audio")
 
                     val topics = initial
 
@@ -535,6 +546,9 @@ class BridgeServer(
                     }
                     if ("usb" in topics) hub.usb.value?.let {
                         sendJson(StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
+                    }
+                    if ("audio" in topics) hub.audio.value?.let {
+                        sendJson(StreamEnvelope("audio", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
                     if ("sensors" in topics) {
                         val snap = hub.sensorSnapshot()
@@ -583,6 +597,15 @@ class BridgeServer(
                                     sendJson(
                                         StreamEnvelope(
                                             "telephony",
+                                            TimeUtil.nowIso(),
+                                            json.encodeToJsonElement(event.reading),
+                                        ),
+                                    )
+                                }
+                                is HubEvent.Audio -> if ("audio" in topics) {
+                                    sendJson(
+                                        StreamEnvelope(
+                                            "audio",
                                             TimeUtil.nowIso(),
                                             json.encodeToJsonElement(event.reading),
                                         ),
@@ -724,6 +747,7 @@ class BridgeServer(
             battery = hub.battery.value,
             network = hub.network.value,
             telephony = hub.telephony.value,
+            audio = hub.audio.value,
             sensors = hub.sensorSnapshot(),
             camera_meta = hub.cameraMeta.value,
             usb = hub.usb.value ?: usbCollector.overview(),
@@ -744,7 +768,7 @@ class BridgeServer(
         )
     }
 
-    private suspend fun io.ktor.websocket.DefaultWebSocketServerSession.sendJson(envelope: StreamEnvelope) {
+    private suspend fun DefaultWebSocketServerSession.sendJson(envelope: StreamEnvelope) {
         send(Frame.Text(json.encodeToString(envelope)))
     }
 

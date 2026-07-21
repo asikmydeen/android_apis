@@ -301,18 +301,14 @@ class UsbCollector(
             val sm = context.getSystemService(StorageManager::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && sm != null) {
                 for (vol in sm.storageVolumes) {
-                    val path = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        vol.directory?.absolutePath
+                    val pathFile: File? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        vol.directory
                     } else {
                         @Suppress("DEPRECATION")
-                        vol.javaClass.methods
-                            .firstOrNull { it.name == "getPathFile" }
-                            ?.invoke(vol) as? File
-                            ?: vol.javaClass.methods
-                                .firstOrNull { it.name == "getPath" }
-                                ?.invoke(vol) as? String
-                                ?.let { File(it) }
-                    }?.absolutePath
+                        (vol.javaClass.methods.firstOrNull { it.name == "getPathFile" }?.invoke(vol) as? File)
+                            ?: (vol.javaClass.methods.firstOrNull { it.name == "getPath" }?.invoke(vol) as? String)?.let { File(it) }
+                    }
+                    val path: String? = pathFile?.absolutePath
 
                     val removable = vol.isRemovable
                     val primary = vol.isPrimary

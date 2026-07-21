@@ -18,9 +18,26 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import android.hardware.Sensor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -52,6 +69,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
     val running by BridgeRuntime.running.collectAsState()
     val location by BridgeRuntime.hub.location.collectAsState()
     val battery by BridgeRuntime.hub.battery.collectAsState()
+    val audio by BridgeRuntime.hub.audio.collectAsState()
     val sensors by BridgeRuntime.hub.sensors.collectAsState()
     val usb by BridgeRuntime.hub.usb.collectAsState()
     val port by BridgeRuntime.portState.collectAsState()
@@ -75,19 +93,28 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
         }
     }
 
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha"
+    )
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Device Bridge", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text("v${BridgeRuntime.VERSION}", style = MaterialTheme.typography.labelMedium)
-
-        Card(
+        ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
                 containerColor = if (running) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
@@ -95,47 +122,111 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
                 },
             ),
         ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (running) Color(0xFF10B981).copy(alpha = pulseAlpha)
+                                    else Color(0xFF9CA3AF)
+                                )
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            if (running) "API Bridge Active" else "Bridge Stopped",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Text(
+                        "v${BridgeRuntime.VERSION}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 Text(
-                    if (running) "● API running" else "○ API stopped",
-                    style = MaterialTheme.typography.titleLarge,
+                    "http://127.0.0.1:$port",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-                Text("http://127.0.0.1:$port", fontFamily = FontFamily.Monospace)
+
                 Text(
                     "Mode: ${BridgePrefs.networkMode(context).name} · Auth: ${if (BridgePrefs.authEnabled(context)) "on" else "off"}",
                     style = MaterialTheme.typography.bodySmall,
                 )
+
                 diagHint?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
+
+                // One-click prominent master toggle button
+                Button(
+                    onClick = {
+                        if (running) {
+                            BridgeForegroundService.stop(context)
+                        } else {
                             if (!permissionState.allPermissionsGranted) {
                                 permissionState.launchMultiplePermissionRequest()
                             }
                             BridgeForegroundService.start(context)
-                        },
-                        enabled = !running,
-                    ) { Text("Start") }
-                    OutlinedButton(
-                        onClick = { BridgeForegroundService.stop(context) },
-                        enabled = running,
-                    ) { Text("Stop") }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = if (running) {
+                        androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    } else {
+                        androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    },
+                ) {
+                    Text(
+                        if (running) "Stop Bridge Service" else "Start Bridge Service",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
                     OutlinedButton(
                         onClick = {
                             copy(context, "http://127.0.0.1:$port")
                             Toast.makeText(context, "Local URL copied", Toast.LENGTH_SHORT).show()
                         },
-                    ) { Text("Copy URL") }
+                    ) { Text("Copy Local URL") }
                 }
             }
         }
 
-        // Quick status chips
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Live", style = MaterialTheme.typography.titleMedium)
+        // Live status
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Live Telemetry", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                
                 StatusLine(
                     "Location",
                     location?.let {
@@ -144,7 +235,18 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
                     } ?: "no fix",
                 )
                 StatusLine("Battery", battery?.let { "${it.percent}% ${it.status}" } ?: "—")
-                StatusLine("Sensors", "${sensors.size} readings")
+                StatusLine("Microphone", audio?.let { "%.1f dB".format(it.rms_db) } ?: "off")
+                
+                val stepCounterReading = sensors.values.firstOrNull { it.type == Sensor.TYPE_STEP_COUNTER }
+                val stepStr = if (stepCounterReading != null && stepCounterReading.values.size >= 2) {
+                    "+${stepCounterReading.values[1].toInt()} steps (session) · ${stepCounterReading.values[0].toInt()} (boot)"
+                } else if (stepCounterReading != null) {
+                    "${stepCounterReading.values.firstOrNull()?.toInt()} steps (boot)"
+                } else {
+                    "${sensors.size} sensors reporting"
+                }
+                StatusLine("Sensors", stepStr)
+                
                 StatusLine(
                     "USB",
                     usb?.let { "${it.device_count} devices · ${it.storage_volumes.size} volumes" } ?: "—",
