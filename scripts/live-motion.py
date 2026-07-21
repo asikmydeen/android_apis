@@ -45,6 +45,15 @@ SHOW_CUR = "\033[?25h"
 CLEAR = "\033[2J\033[H"
 
 
+def _read_first_line(path: str) -> str:
+    try:
+        if os.path.isfile(path):
+            return open(path, encoding="utf-8").read().strip()
+    except OSError:
+        pass
+    return ""
+
+
 def load_token_from_files() -> str:
     candidates = [
         os.environ.get("BRIDGE_TOKEN_FILE", ""),
@@ -55,25 +64,80 @@ def load_token_from_files() -> str:
     for path in candidates:
         if not path:
             continue
-        try:
-            if os.path.isfile(path):
-                tok = open(path, encoding="utf-8").read().strip()
-                if tok:
-                    return tok
-        except OSError:
-            continue
+        tok = _read_first_line(path)
+        if tok:
+            return tok
     return ""
 
 
+def load_bridge_from_files() -> str:
+    candidates = [
+        os.environ.get("BRIDGE_URL_FILE", ""),
+        os.path.expanduser("~/.config/device-bridge/url"),
+        os.path.expanduser("~/.device-bridge-url"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bridge-url"),
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        url = _read_first_line(path)
+        if url:
+            return url
+    return ""
+
+
+def normalize_bridge_url(raw: str) -> str:
+    """Accept 100.x.x.x, 100.x.x.x:8765, or full http URL."""
+    s = (raw or "").strip().rstrip("/")
+    if not s:
+        return ""
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    # bare host or host:port
+    if "://" not in s:
+        if ":" not in s:
+            s = f"{s}:8765"
+        return f"http://{s}"
+    return s
+
+
+def is_localhost_bridge(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        host = ""
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Soft live motion UI for Device Bridge")
-    p.add_argument("--bridge", default=os.environ.get("BRIDGE", "http://127.0.0.1:8765"))
+    p = argparse.ArgumentParser(
+        description="Soft live motion UI for Device Bridge",
+        epilog=(
+            "Remote (another PC): script will ask for Tailscale URL if localhost fails. "
+            "Or: --bridge http://100.x.x.x:8765  /  env BRIDGE  /  ~/.device-bridge-url"
+        ),
+    )
+    default_bridge = (
+        os.environ.get("BRIDGE")
+        or load_bridge_from_files()
+        or "http://127.0.0.1:8765"
+    )
+    p.add_argument(
+        "--bridge",
+        default=default_bridge,
+        help="Base URL (env BRIDGE, ~/.device-bridge-url, or default localhost)",
+    )
     p.add_argument(
         "--token",
         default=os.environ.get("BRIDGE_TOKEN")
         or os.environ.get("TOKEN")
         or load_token_from_files()
         or "",
+    )
+    p.add_argument(
+        "--ask-bridge",
+        action="store_true",
+        help="Always prompt for bridge URL (useful from another machine)",
     )
     p.add_argument("--http-only", action="store_true")
     p.add_argument("--interval", type=float, default=0.04, help="HTTP poll s (default ~25Hz)")
