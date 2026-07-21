@@ -140,7 +140,18 @@ def parse_args() -> argparse.Namespace:
         help="Always prompt for bridge URL (useful from another machine)",
     )
     p.add_argument("--http-only", action="store_true")
-    p.add_argument("--interval", type=float, default=0.04, help="HTTP poll s (default ~25Hz)")
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="HTTP poll interval seconds (default: 0.04 local, 0.08 remote)",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="HTTP timeout seconds (default: 3 local, 12 remote Tailscale)",
+    )
     p.add_argument(
         "--sensitivity",
         choices=("normal", "high", "ultra"),
@@ -166,6 +177,83 @@ def http_get_json(url: str, token: str, timeout: float = 2.0) -> Any:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+class BridgeHttpClient:
+    """
+    Keep-alive HTTP client. Reusing one TCP connection avoids Tailscale/handshake
+    spikes that show up as random timeouts when polling every few ms.
+    """
+
+    def __init__(self, base: str, token: str, timeout: float = 8.0) -> None:
+        self.base = base.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+        parsed = urlparse(self.base)
+        self.scheme = parsed.scheme or "http"
+        self.host = parsed.hostname or "127.0.0.1"
+        self.port = parsed.port or (443 if self.scheme == "https" else 80)
+        self._conn: Any = None
+        self._fail_streak = 0
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def _connect(self) -> Any:
+        import http.client
+
+        self.close()
+        if self.scheme == "https":
+            conn = http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout)
+        else:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        self._conn = conn
+        return conn
+
+    def get_json(self, path: str) -> Any:
+        import http.client
+
+        path = path if path.startswith("/") else "/" + path
+        if self.token:
+            sep = "&" if "?" in path else "?"
+            path = f"{path}{sep}{urlencode({'token': self.token})}"
+        headers = {"Connection": "keep-alive", "Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                conn = self._conn or self._connect()
+                conn.request("GET", path, headers=headers)
+                resp = conn.getresponse()
+                body = resp.read()
+                if resp.status == 401:
+                    raise urllib.error.HTTPError(
+                        self.base + path, 401, "Unauthorized", resp.headers, None  # type: ignore
+                    )
+                if resp.status >= 400:
+                    raise urllib.error.HTTPError(
+                        self.base + path, resp.status, resp.reason, resp.headers, None  # type: ignore
+                    )
+                self._fail_streak = 0
+                return json.loads(body.decode("utf-8"))
+            except urllib.error.HTTPError:
+                raise
+            except Exception as e:
+                last_err = e
+                self._fail_streak += 1
+                self.close()
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+                    continue
+                raise TimeoutError(f"{type(e).__name__}: {e}") from e
+        raise TimeoutError(str(last_err) if last_err else "request failed")
 
 
 def mag3(x: float, y: float, z: float) -> float:
@@ -522,6 +610,30 @@ def render(
     return "\n".join(lines) + SHOW_CUR
 
 
+def explain_wait(err: BaseException, bridge: str, fail_streak: int) -> str:
+    remote = not is_localhost_bridge(bridge)
+    tips = [
+        f"waiting for bridge… ({type(err).__name__}: {err})",
+        f"url={bridge}  fails_in_a_row={fail_streak}",
+        "",
+    ]
+    if remote:
+        tips += [
+            "Common on Tailscale (usually temporary):",
+            "  • phone slept / Doze paused the app — unlock phone, keep bridge notification",
+            "  • Tailscale reconnecting (Wi‑Fi↔cell) or DERP relay blip",
+            "  • request timeout too short — script uses longer remote timeouts now",
+            "  • set battery Unrestricted for Device Bridge on Samsung",
+            "",
+            "If it never recovers: open phone, Start bridge, check Tailscale is Connected.",
+        ]
+    else:
+        tips += [
+            "Local bridge not answering — is Device Bridge Started?",
+        ]
+    return CLEAR + "\n  ".join([""] + tips) + "\n"
+
+
 def run_http(
     bridge: str,
     token: str,
@@ -529,26 +641,46 @@ def run_http(
     half: int,
     sensitivity: str,
     use_color: bool,
+    timeout: float,
 ) -> None:
     state = MotionState()
-    url = bridge.rstrip("/") + "/v1/sensors"
-    print(f"{DIM}soft polling {url}{RESET}", file=sys.stderr)
-    while True:
-        try:
-            data = http_get_json(url, token, timeout=max(1.0, interval * 4))
-            if not isinstance(data, dict):
+    client = BridgeHttpClient(bridge, token, timeout=timeout)
+    remote = not is_localhost_bridge(bridge)
+    print(
+        f"{DIM}polling {bridge}/v1/sensors  interval={interval:.0f}ms  timeout={timeout:.0f}s"
+        f"{'  (remote/Tailscale)' if remote else ''}{RESET}",
+        file=sys.stderr,
+    )
+    try:
+        while True:
+            try:
+                data = client.get_json("/v1/sensors")
+                if not isinstance(data, dict):
+                    time.sleep(interval)
+                    continue
+                lin, gyro, acc = extract_from_sensors_map(data)
+                metrics = state.update(lin, gyro, acc)
+                sys.stdout.write(render(metrics, state, half, sensitivity, "live", use_color))
+                sys.stdout.flush()
                 time.sleep(interval)
-                continue
-            lin, gyro, acc = extract_from_sensors_map(data)
-            metrics = state.update(lin, gyro, acc)
-            sys.stdout.write(render(metrics, state, half, sensitivity, "live", use_color))
-            sys.stdout.flush()
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
-            sys.stdout.write(f"{CLEAR}  waiting for bridge… {e}\n")
-            sys.stdout.flush()
-            time.sleep(1.0)
-            continue
-        time.sleep(interval)
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    sys.stdout.write(
+                        f"{CLEAR}  auth failed (401) — token expired? rotate in app Remote tab\n"
+                    )
+                    sys.stdout.flush()
+                    time.sleep(2.0)
+                    continue
+                sys.stdout.write(explain_wait(e, bridge, client._fail_streak))
+                sys.stdout.flush()
+                time.sleep(min(5.0, 0.5 * max(1, client._fail_streak)))
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ConnectionError) as e:
+                sys.stdout.write(explain_wait(e, bridge, client._fail_streak))
+                sys.stdout.flush()
+                # backoff so we don't spam a sleeping phone
+                time.sleep(min(5.0, 0.4 * max(1, client._fail_streak)))
+    finally:
+        client.close()
 
 
 def run_websocket(
@@ -613,17 +745,17 @@ def run_websocket(
 
 def main() -> int:
     args = parse_args()
-    bridge = args.bridge.rstrip("/")
+    bridge = normalize_bridge_url(args.bridge) or "http://127.0.0.1:8765"
     token = args.token
     use_color = not args.no_color and sys.stdout.isatty()
     half = max(9, args.width)
 
-    def try_health(tok: str) -> Any:
-        return http_get_json(bridge + "/v1/health", tok, timeout=3.0)
+    def try_health(base: str, tok: str) -> Any:
+        return http_get_json(base.rstrip("/") + "/v1/health", tok, timeout=3.0)
 
     def prompt_token(reason: str) -> str:
         print(reason, file=sys.stderr)
-        print("Device Bridge → Remote → copy token", file=sys.stderr)
+        print("Phone app → Remote tab → copy token", file=sys.stderr)
         try:
             tok = getpass.getpass("Token (hidden): ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -636,48 +768,133 @@ def main() -> int:
                 return ""
         return tok
 
-    def maybe_save_token(tok: str) -> None:
-        path = os.path.expanduser("~/.device-bridge-token")
-        if not tok or os.path.isfile(path):
+    def prompt_bridge(reason: str, current: str) -> str:
+        print(reason, file=sys.stderr)
+        print("", file=sys.stderr)
+        print("On the phone (Device Bridge → Remote → Tailscale mode):", file=sys.stderr)
+        print("  copy the URL like  http://100.x.x.x:8765", file=sys.stderr)
+        print("You can also paste just  100.x.x.x  or  100.x.x.x:8765", file=sys.stderr)
+        print("", file=sys.stderr)
+        default_hint = current if not is_localhost_bridge(current) else ""
+        prompt = "Bridge URL"
+        if default_hint:
+            prompt += f" [{default_hint}]"
+        prompt += ": "
+        try:
+            raw = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            return ""
+        if not raw and default_hint:
+            raw = default_hint
+        return normalize_bridge_url(raw)
+
+    def maybe_save(path: str, value: str, label: str) -> None:
+        if not value or os.path.isfile(path):
             return
         try:
-            ans = input(f"Save token to {path}? [y/N] ").strip().lower()
+            ans = input(f"Save {label} to {path} for next time? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
         if ans in ("y", "yes"):
             try:
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(tok + "\n")
+                    f.write(value + "\n")
                 os.chmod(path, 0o600)
                 print(f"Saved {path}", file=sys.stderr)
             except OSError as ex:
                 print(f"Could not save: {ex}", file=sys.stderr)
 
-    health = None
-    try:
-        health = try_health(token)
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            token = prompt_token("Auth required (401).")
-            if not token:
-                print("No token.", file=sys.stderr)
-                return 1
+    def maybe_save_token(tok: str) -> None:
+        maybe_save(os.path.expanduser("~/.device-bridge-token"), tok, "token")
+
+    def maybe_save_bridge(url: str) -> None:
+        if is_localhost_bridge(url):
+            return
+        maybe_save(os.path.expanduser("~/.device-bridge-url"), url, "Tailscale/bridge URL")
+
+    # Always ask if requested; otherwise try localhost/saved URL first
+    if args.ask_bridge or (
+        not os.environ.get("BRIDGE")
+        and is_localhost_bridge(bridge)
+        and not load_bridge_from_files()
+        and sys.stdin.isatty()
+    ):
+        # From another machine, localhost never works — probe quickly
+        probe_fail = False
+        if is_localhost_bridge(bridge):
             try:
-                health = try_health(token)
-            except Exception as e2:
-                print(f"Still cannot auth: {e2}", file=sys.stderr)
+                try_health(bridge, token)
+            except urllib.error.HTTPError:
+                probe_fail = False  # server exists (auth later)
+            except Exception:
+                probe_fail = True
+        if args.ask_bridge or probe_fail:
+            new_b = prompt_bridge(
+                "No Device Bridge on localhost (normal on another PC)."
+                if probe_fail
+                else "Enter Device Bridge address.",
+                bridge,
+            )
+            if not new_b:
+                print("No bridge URL entered.", file=sys.stderr)
                 return 1
-            maybe_save_token(token)
-        else:
-            print(f"Cannot reach health: {e}", file=sys.stderr)
-            return 1
-    except Exception as e:
-        print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
-        print("Start Device Bridge, then retry.", file=sys.stderr)
+            bridge = new_b
+
+    health = None
+    for attempt in range(3):
+        try:
+            health = try_health(bridge, token)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                token = prompt_token("Auth required (401).")
+                if not token:
+                    print("No token.", file=sys.stderr)
+                    return 1
+                try:
+                    health = try_health(bridge, token)
+                    maybe_save_token(token)
+                    break
+                except urllib.error.HTTPError as e2:
+                    if e2.code == 401:
+                        print("Token rejected. Check Remote tab / rotate.", file=sys.stderr)
+                        token = ""
+                        continue
+                    print(f"Still cannot auth: {e2}", file=sys.stderr)
+                    return 1
+                except Exception as e2:
+                    print(f"Still cannot reach bridge: {e2}", file=sys.stderr)
+                    # fall through to ask URL
+            else:
+                print(f"HTTP {e.code} from {bridge}/v1/health", file=sys.stderr)
+                return 1
+        except Exception as e:
+            print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
+            if not sys.stdin.isatty():
+                print("Start Device Bridge, or set BRIDGE=http://100.x.x.x:8765", file=sys.stderr)
+                return 1
+            new_b = prompt_bridge(
+                "Could not connect. Paste the phone's Tailscale URL from Device Bridge → Remote.",
+                bridge,
+            )
+            if not new_b:
+                print("No bridge URL entered.", file=sys.stderr)
+                return 1
+            bridge = new_b
+            continue
+
+    if health is None:
+        print("Could not connect to Device Bridge.", file=sys.stderr)
         return 1
 
+    maybe_save_bridge(bridge)
+
     print(
-        f"Bridge OK v{health.get('version')}  "
+        f"Bridge OK {bridge}  v{health.get('version')}  "
         f"{'degraded' if health.get('degraded') else 'smooth'}  "
         f"sensitivity={args.sensitivity}",
         file=sys.stderr,
