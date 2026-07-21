@@ -198,21 +198,27 @@ class TouchState:
     def update(self, touch_data: Optional[Dict[str, Any]]) -> None:
         if not touch_data or not isinstance(touch_data, dict):
             return
-        self.action = touch_data.get("action", "UP")
-        self.screen_w = touch_data.get("screen_width", 1080)
-        self.screen_h = touch_data.get("screen_height", 2316)
 
         pointers = touch_data.get("pointers", [])
         if pointers and isinstance(pointers, list):
             p0 = pointers[0]
             if isinstance(p0, dict):
-                self.x = p0.get("x", 0.0)
-                self.y = p0.get("y", 0.0)
-                self.x_norm = p0.get("x_norm", 0.5)
-                self.y_norm = p0.get("y_norm", 0.5)
+                x_n = p0.get("x_norm", 0.5)
+                y_n = p0.get("y_norm", 0.5)
+                act = touch_data.get("action", "UP")
                 now = time.time()
-                self.last_touch_time = now
-                self.touch_trail.append((self.x_norm, self.y_norm, now))
+
+                # Check if position actually moved or new action occurred
+                if act in ("DOWN", "MOVE") or (abs(x_n - self.x_norm) > 0.01 or abs(y_n - self.y_norm) > 0.01):
+                    self.x = p0.get("x", 0.0)
+                    self.y = p0.get("y", 0.0)
+                    self.x_norm = x_n
+                    self.y_norm = y_n
+                    self.action = act
+                    self.screen_w = touch_data.get("screen_width", 1080)
+                    self.screen_h = touch_data.get("screen_height", 2520)
+                    self.last_touch_time = now
+                    self.touch_trail.append((self.x_norm, self.y_norm, now))
 
     def get_region_label(self) -> str:
         if (time.time() - self.last_touch_time) > 1.5:
@@ -460,24 +466,24 @@ def render_dashboard(
         f"  {C_GREEN}Force:{RESET} {metrics['g_mag']:5.2f}m/s² [{g_bar}]   {screen_pad[2]}"
     )
     lines.append(
-        f"  {C_PURPLE}State:{RESET} {BOLD}{metrics['state_desc'][:22]:<22}{RESET} {screen_pad[3]}"
+        f"  {C_PURPLE}State:{RESET} {BOLD}{metrics['state_desc'][:20]:<20}{RESET}   {screen_pad[3]}"
     )
 
-    t_str = f"x:{touch.x:.0f} y:{touch.y:.0f} ({touch.x_norm:.2f}, {touch.y_norm:.2f})"
+    t_str = f"x:{touch.x:.0f} y:{touch.y:.0f} ({touch.x_norm:.2f},{touch.y_norm:.2f})"
     lines.append(
-        f"  {C_ROSE}Touch:{RESET} {BOLD}{touch.get_region_label()[:22]:<22}{RESET} {screen_pad[4]}"
+        f"  {C_ROSE}Touch:{RESET} {BOLD}{touch.get_region_label()[:20]:<20}{RESET}   {screen_pad[4]}"
     )
     lines.append(
-        f"  {C_GRAY}{t_str:<32}{RESET} {screen_pad[5]}"
+        f"  {C_GRAY}{t_str:<29}{RESET}   {screen_pad[5]}"
     )
     lines.append(
-        f"  {'':<39} {screen_pad[6]}"
+        f"  {'':<29}   {screen_pad[6]}"
     )
     lines.append(
-        f"  {'':<39} {screen_pad[7]}"
+        f"  {'':<29}   {screen_pad[7]}"
     )
     lines.append(
-        f"  {'':<39} {screen_pad[8]}"
+        f"  {'':<29}   {screen_pad[8]}"
     )
 
     gestures_str = "  ".join([f"⚡ {g}" for g in metrics["recent_gestures"][-3:]]) or "None"
