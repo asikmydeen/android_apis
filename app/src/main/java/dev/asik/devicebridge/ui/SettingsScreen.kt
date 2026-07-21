@@ -197,6 +197,19 @@ fun SettingsScreen() {
                     streamTouch = it
                     BridgePrefs.setStreamTouch(context, it)
                 }
+                Button(
+                    onClick = {
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            context.startActivity(intent)
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Could not open Accessibility Settings", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Enable Global Touch Tracking (Accessibility)")
+                }
                 PrefSwitch("USB", streamUsb) {
                     streamUsb = it
                     BridgePrefs.setStreamUsb(context, it)
