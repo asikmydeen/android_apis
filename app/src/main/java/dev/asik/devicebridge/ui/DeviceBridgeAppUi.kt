@@ -44,7 +44,7 @@ fun DeviceBridgeAppUi() {
             }
         },
     ) { padding ->
-        androidx.compose.foundation.layout.Box(Modifier = Modifier.padding(padding)) {
+        androidx.compose.foundation.layout.Box(modifier = Modifier.padding(padding)) {
             when (tab) {
                 0 -> HomeScreen(onOpenRemote = { tab = 1 })
                 1 -> RemoteScreen()

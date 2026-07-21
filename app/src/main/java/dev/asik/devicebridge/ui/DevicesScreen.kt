@@ -50,7 +50,7 @@ fun DevicesScreen() {
         Text("Devices & data", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Location", style = MaterialTheme.typography.titleMedium)
                 Text(
                     location?.let {

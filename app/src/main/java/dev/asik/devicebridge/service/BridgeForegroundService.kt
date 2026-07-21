@@ -15,15 +15,19 @@ import androidx.core.app.ServiceCompat
 import dev.asik.devicebridge.BridgeRuntime
 import dev.asik.devicebridge.MainActivity
 import dev.asik.devicebridge.R
+import dev.asik.devicebridge.util.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 class BridgeForegroundService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Off the main thread: stopServer() calls Ktor engine.stop(), which blocks up to ~3s.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,19 +50,11 @@ class BridgeForegroundService : Service() {
             else -> {
                 val notification = buildNotification()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val type = when {
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
-                                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-                                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                        }
-                        else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                    }
                     ServiceCompat.startForeground(
                         this,
                         NOTIFICATION_ID,
                         notification,
-                        type,
+                        foregroundServiceType(),
                     )
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
@@ -75,9 +71,39 @@ class BridgeForegroundService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Build the FGS type mask from permissions actually held right now.
+     *
+     * Android 14+ (and 10+ for the location type) throws SecurityException if a service
+     * foregrounds with a `location`/`camera` type whose runtime permission is not granted,
+     * so the type must never claim more than we hold. SPECIAL_USE (API 34+) is always safe
+     * here because it is backed by the manifest PROPERTY_SPECIAL_USE_FGS_SUBTYPE.
+     */
+    private fun foregroundServiceType(): Int {
+        val hasLocation = PermissionHelper.hasLocation(this)
+        val hasCamera = PermissionHelper.hasCamera(this)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (hasLocation) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            if (hasCamera) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            type
+        } else {
+            // API 29-33: no SPECIAL_USE type. Only declare LOCATION when granted;
+            // otherwise start typeless (0) to avoid a permission-mismatch crash.
+            if (hasLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
+        }
+    }
+
     override fun onDestroy() {
-        scope.launch {
-            runCatching { BridgeRuntime.stopServer() }
+        // Run teardown to completion, THEN cancel the scope. Cancelling first (the old bug)
+        // killed stopServer() mid-flight, leaking the Ktor engine + all collector listeners.
+        // On the normal ACTION_STOP path the server is already stopped, so this is a fast
+        // no-op; the bounded runBlocking only does work on a direct system kill, where a
+        // brief block to release the engine beats leaking it for the process lifetime.
+        runBlocking {
+            withTimeoutOrNull(STOP_TIMEOUT_MS) {
+                runCatching { BridgeRuntime.stopServer() }
+            }
         }
         scope.cancel()
         super.onDestroy()
@@ -125,6 +151,9 @@ class BridgeForegroundService : Service() {
         const val CHANNEL_ID = "bridge_service"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "dev.asik.devicebridge.STOP"
+
+        // Upper bound for onDestroy teardown; Ktor engine.stop() uses ~2s (1s grace + 1s).
+        private const val STOP_TIMEOUT_MS = 3000L
 
         fun start(context: Context) {
             val intent = Intent(context, BridgeForegroundService::class.java)

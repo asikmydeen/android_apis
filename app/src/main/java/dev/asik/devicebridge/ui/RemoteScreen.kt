@@ -86,7 +86,7 @@ fun RemoteScreen() {
         )
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Network mode", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ModeChip("Local", mode == NetworkMode.LOCAL) { applyMode(NetworkMode.LOCAL) }

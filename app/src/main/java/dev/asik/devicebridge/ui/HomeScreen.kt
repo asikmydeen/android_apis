@@ -95,7 +95,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
                 },
             ),
         ) {
-            Column(Modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     if (running) "● API running" else "○ API stopped",
                     style = MaterialTheme.typography.titleLarge,
@@ -134,7 +134,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
 
         // Quick status chips
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Live", style = MaterialTheme.typography.titleMedium)
                 StatusLine(
                     "Location",
@@ -201,7 +201,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Internet / remote", style = MaterialTheme.typography.titleMedium)
                 Text(
                     "Expose via Tailscale or Cloudflare from the Remote tab. Token auth is forced when not local-only.",
@@ -212,7 +212,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Text("Quick curl", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
