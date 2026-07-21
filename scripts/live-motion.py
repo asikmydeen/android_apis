@@ -30,6 +30,27 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse
 
 
+def load_token_from_files() -> str:
+    """Optional token files so you don't have to export every time."""
+    candidates = [
+        os.environ.get("BRIDGE_TOKEN_FILE", ""),
+        os.path.expanduser("~/.config/device-bridge/token"),
+        os.path.expanduser("~/.device-bridge-token"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bridge-token"),
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            if os.path.isfile(path):
+                tok = open(path, encoding="utf-8").read().strip()
+                if tok:
+                    return tok
+        except OSError:
+            continue
+    return ""
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Live micro-motion display from Device Bridge")
     p.add_argument(
@@ -39,8 +60,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--token",
-        default=os.environ.get("BRIDGE_TOKEN") or os.environ.get("TOKEN") or "",
-        help="Bearer token (env BRIDGE_TOKEN or TOKEN)",
+        default=os.environ.get("BRIDGE_TOKEN")
+        or os.environ.get("TOKEN")
+        or load_token_from_files()
+        or "",
+        help="Bearer token (env BRIDGE_TOKEN/TOKEN, or ~/.device-bridge-token)",
     )
     p.add_argument(
         "--http-only",
@@ -349,12 +373,27 @@ def main() -> int:
     try:
         health = http_get_json(bridge + "/v1/health", token, timeout=3.0)
         print(
-            f"Bridge OK version={health.get('version')} degraded={health.get('degraded')}",
+            f"Bridge OK version={health.get('version')} degraded={health.get('degraded')}"
+            + (f" auth=on" if token else " auth=off/local"),
             file=sys.stderr,
         )
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print("HTTP 401 Unauthorized — Device Bridge has auth ON (LAN/Tailscale/Cloudflare).", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Fix (pick one):", file=sys.stderr)
+            print("  1) export BRIDGE_TOKEN='your_token_from_app_Remote_tab'", file=sys.stderr)
+            print("  2) python3 live-motion.py --token 'your_token'", file=sys.stderr)
+            print("  3) echo 'your_token' > ~/.device-bridge-token && chmod 600 ~/.device-bridge-token", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("In the Device Bridge app: Remote → copy token (or Rotate).", file=sys.stderr)
+            print("Or set mode to Local and turn auth off (Settings) for on-device only.", file=sys.stderr)
+            return 1
+        print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
-        print("Is Device Bridge started? Token correct?", file=sys.stderr)
+        print("Is Device Bridge started? Try: curl -s http://127.0.0.1:8765/", file=sys.stderr)
         return 1
 
     if not args.http_only:
