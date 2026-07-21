@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import math
 import os
@@ -369,32 +370,85 @@ def main() -> int:
     bridge = args.bridge.rstrip("/")
     token = args.token
 
-    # quick health check
+    def try_health(tok: str) -> Any:
+        return http_get_json(bridge + "/v1/health", tok, timeout=3.0)
+
+    def prompt_token(reason: str) -> str:
+        print(reason, file=sys.stderr)
+        print("Device Bridge app → Remote tab → copy token", file=sys.stderr)
+        # getpass hides input; also offer visible fallback if empty
+        try:
+            tok = getpass.getpass("Token (input hidden): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            return ""
+        if not tok:
+            try:
+                tok = input("Token (visible): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("", file=sys.stderr)
+                return ""
+        return tok
+
+    def maybe_save_token(tok: str) -> None:
+        path = os.path.expanduser("~/.device-bridge-token")
+        if not tok or os.path.isfile(path):
+            return
+        try:
+            ans = input(f"Save token to {path} for next time? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            return
+        if ans in ("y", "yes"):
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(tok + "\n")
+                os.chmod(path, 0o600)
+                print(f"Saved {path}", file=sys.stderr)
+            except OSError as ex:
+                print(f"Could not save token: {ex}", file=sys.stderr)
+
+    # quick health check — prompt for token on 401 or if none provided after a failed try
+    health = None
     try:
-        health = http_get_json(bridge + "/v1/health", token, timeout=3.0)
-        print(
-            f"Bridge OK version={health.get('version')} degraded={health.get('degraded')}"
-            + (f" auth=on" if token else " auth=off/local"),
-            file=sys.stderr,
-        )
+        health = try_health(token)
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            print("HTTP 401 Unauthorized — Device Bridge has auth ON (LAN/Tailscale/Cloudflare).", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("Fix (pick one):", file=sys.stderr)
-            print("  1) export BRIDGE_TOKEN='your_token_from_app_Remote_tab'", file=sys.stderr)
-            print("  2) python3 live-motion.py --token 'your_token'", file=sys.stderr)
-            print("  3) echo 'your_token' > ~/.device-bridge-token && chmod 600 ~/.device-bridge-token", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("In the Device Bridge app: Remote → copy token (or Rotate).", file=sys.stderr)
-            print("Or set mode to Local and turn auth off (Settings) for on-device only.", file=sys.stderr)
+            token = prompt_token(
+                "Auth required (HTTP 401). Paste token from the app Remote tab."
+            )
+            if not token:
+                print("No token entered.", file=sys.stderr)
+                return 1
+            try:
+                health = try_health(token)
+            except Exception as e2:
+                print(f"Still cannot auth: {e2}", file=sys.stderr)
+                return 1
+            maybe_save_token(token)
+            # keep for this process (WS/HTTP use `token`)
+        else:
+            print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
             return 1
-        print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
-        return 1
     except Exception as e:
+        # connection error — still offer token if they forgot and server needs it later
         print(f"Cannot reach {bridge}/v1/health: {e}", file=sys.stderr)
         print("Is Device Bridge started? Try: curl -s http://127.0.0.1:8765/", file=sys.stderr)
         return 1
+
+    if health is None:
+        return 1
+
+    if not token:
+        # Public health without auth — ask only if user wants remote later; fine for local
+        pass
+
+    print(
+        f"Bridge OK version={health.get('version')} degraded={health.get('degraded')}"
+        + (" auth=on" if token else " auth=off/local"),
+        file=sys.stderr,
+    )
 
     if not args.http_only:
         try:
