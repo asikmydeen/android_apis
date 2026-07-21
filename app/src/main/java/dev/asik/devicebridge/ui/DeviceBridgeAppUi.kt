@@ -42,9 +42,12 @@ import androidx.compose.ui.unit.dp
 import dev.asik.devicebridge.BridgeRuntime
 import dev.asik.devicebridge.service.BridgeForegroundService
 
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+
 private data class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun DeviceBridgeAppUi() {
     val context = LocalContext.current
@@ -59,6 +62,12 @@ fun DeviceBridgeAppUi() {
     )
 
     Scaffold(
+        modifier = Modifier.pointerInteropFilter { motionEvent ->
+            if (running) {
+                BridgeRuntime.touchCollector.onMotionEvent(motionEvent)
+            }
+            false
+        },
         topBar = {
             CenterAlignedTopAppBar(
                 title = {

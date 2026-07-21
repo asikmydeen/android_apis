@@ -286,6 +286,18 @@ class BridgeServer(
                     }
                 }
 
+                get("/v1/touch") {
+                    val t = hub.touch.value
+                    if (t == null) {
+                        call.respond(
+                            HttpStatusCode.ServiceUnavailable,
+                            ApiErrorBody(ApiError("no_data", "No touch event captured yet. Touch screen to generate event.")),
+                        )
+                    } else {
+                        call.respond(t)
+                    }
+                }
+
                 get("/v1/sensors") {
                     call.respond(hub.sensorSnapshot())
                 }
@@ -518,7 +530,7 @@ class BridgeServer(
                         ?.map { it.trim() }
                         ?.filter { it.isNotEmpty() }
                         ?.toMutableSet()
-                        ?: mutableSetOf("location", "battery", "sensors", "network", "usb", "audio")
+                        ?: mutableSetOf("location", "battery", "sensors", "network", "usb", "audio", "touch")
 
                     val topics = initial
 
@@ -549,6 +561,9 @@ class BridgeServer(
                     }
                     if ("audio" in topics) hub.audio.value?.let {
                         sendJson(StreamEnvelope("audio", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
+                    }
+                    if ("touch" in topics) hub.touch.value?.let {
+                        sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
                     if ("sensors" in topics) {
                         val snap = hub.sensorSnapshot()
@@ -606,6 +621,15 @@ class BridgeServer(
                                     sendJson(
                                         StreamEnvelope(
                                             "audio",
+                                            TimeUtil.nowIso(),
+                                            json.encodeToJsonElement(event.reading),
+                                        ),
+                                    )
+                                }
+                                is HubEvent.Touch -> if ("touch" in topics) {
+                                    sendJson(
+                                        StreamEnvelope(
+                                            "touch",
                                             TimeUtil.nowIso(),
                                             json.encodeToJsonElement(event.reading),
                                         ),
@@ -717,6 +741,16 @@ class BridgeServer(
                         )
                     }
                 }
+
+                webSocket("/v1/stream/touch") {
+                    hub.touch.value?.let {
+                        sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
+                    }
+                    hub.events.filter { it is HubEvent.Touch }.collect { event ->
+                        val reading = (event as HubEvent.Touch).reading
+                        sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
+                    }
+                }
             }
         }
 
@@ -748,6 +782,7 @@ class BridgeServer(
             network = hub.network.value,
             telephony = hub.telephony.value,
             audio = hub.audio.value,
+            touch = hub.touch.value,
             sensors = hub.sensorSnapshot(),
             camera_meta = hub.cameraMeta.value,
             usb = hub.usb.value ?: usbCollector.overview(),

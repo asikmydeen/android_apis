@@ -70,6 +70,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
     val location by BridgeRuntime.hub.location.collectAsState()
     val battery by BridgeRuntime.hub.battery.collectAsState()
     val audio by BridgeRuntime.hub.audio.collectAsState()
+    val touch by BridgeRuntime.hub.touch.collectAsState()
     val sensors by BridgeRuntime.hub.sensors.collectAsState()
     val usb by BridgeRuntime.hub.usb.collectAsState()
     val port by BridgeRuntime.portState.collectAsState()
@@ -236,6 +237,15 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
                 )
                 StatusLine("Battery", battery?.let { "${it.percent}% ${it.status}" } ?: "—")
                 StatusLine("Microphone", audio?.let { "%.1f dB".format(it.rms_db) } ?: "off")
+                StatusLine(
+                    "Touchscreen",
+                    touch?.let { t ->
+                        val p = t.pointers.firstOrNull()
+                        if (p != null) {
+                            "${t.action} x:%.0f y:%.0f (%.2f, %.2f)".format(p.x, p.y, p.x_norm, p.y_norm)
+                        } else "idle"
+                    } ?: "no touches",
+                )
                 
                 val stepCounterReading = sensors.values.firstOrNull { it.type == Sensor.TYPE_STEP_COUNTER }
                 val stepStr = if (stepCounterReading != null && stepCounterReading.values.size >= 2) {

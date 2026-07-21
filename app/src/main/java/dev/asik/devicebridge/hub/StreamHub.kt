@@ -8,6 +8,7 @@ import dev.asik.devicebridge.model.LocationReading
 import dev.asik.devicebridge.model.NetworkReading
 import dev.asik.devicebridge.model.SensorReading
 import dev.asik.devicebridge.model.TelephonyReading
+import dev.asik.devicebridge.model.TouchReading
 import dev.asik.devicebridge.model.UsbEvent
 import dev.asik.devicebridge.model.UsbOverview
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -36,6 +37,9 @@ class StreamHub {
 
     private val _audio = MutableStateFlow<AudioReading?>(null)
     val audio: StateFlow<AudioReading?> = _audio.asStateFlow()
+
+    private val _touch = MutableStateFlow<TouchReading?>(null)
+    val touch: StateFlow<TouchReading?> = _touch.asStateFlow()
 
     private val sensorsMap = ConcurrentHashMap<String, SensorReading>()
     private val _sensors = MutableStateFlow<Map<String, SensorReading>>(emptyMap())
@@ -78,6 +82,11 @@ class StreamHub {
         _events.tryEmit(HubEvent.Audio(value))
     }
 
+    fun publishTouch(value: TouchReading) {
+        _touch.value = value
+        _events.tryEmit(HubEvent.Touch(value))
+    }
+
     fun publishSensor(typeName: String, value: SensorReading) {
         sensorsMap[typeName] = value
         _sensors.value = sensorsMap.toMap()
@@ -111,6 +120,7 @@ sealed class HubEvent {
     data class Network(val reading: NetworkReading) : HubEvent()
     data class Telephony(val reading: TelephonyReading) : HubEvent()
     data class Audio(val reading: AudioReading) : HubEvent()
+    data class Touch(val reading: TouchReading) : HubEvent()
     data class Sensor(val typeName: String, val reading: SensorReading) : HubEvent()
     data class Camera(val meta: CameraMeta) : HubEvent()
     data class Usb(val overview: UsbOverview) : HubEvent()

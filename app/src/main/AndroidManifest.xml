@@ -59,6 +59,18 @@
                 android:value="Local device sensor, media, and USB API bridge for developer tooling" />
         </service>
 
+        <service
+            android:name=".service.BridgeAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true"

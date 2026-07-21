@@ -18,4 +18,6 @@
     <string name="keep_alive_title">Service Protection &amp; Keep-Alive</string>
     <string name="keep_awake_label">Keep CPU &amp; Wi-Fi Awake</string>
     <string name="keep_awake_desc">Acquires WakeLock while active to prevent connections from dropping when screen is off.</string>
+
+    <string name="accessibility_service_desc">Streams global touch screen tap events to Device Bridge local API.</string>
 </resources>

@@ -288,6 +288,28 @@ data class UsbSerialOpenResponse(
 )
 
 @Serializable
+data class TouchPointer(
+    val id: Int,
+    val x: Float,
+    val y: Float,
+    val x_norm: Float,
+    val y_norm: Float,
+    val pressure: Float = 1.0f,
+    val size: Float = 1.0f,
+)
+
+@Serializable
+data class TouchReading(
+    val action: String,
+    val pointers: List<TouchPointer>,
+    val screen_width: Int,
+    val screen_height: Int,
+    val timestamp_ns: Long = System.nanoTime(),
+    val time_ms: Long = System.currentTimeMillis(),
+    val source: String = "app_ui",
+)
+
+@Serializable
 data class DeviceSnapshot(
     val timestamp: String,
     val location: LocationReading? = null,
@@ -295,6 +317,7 @@ data class DeviceSnapshot(
     val network: NetworkReading? = null,
     val telephony: TelephonyReading? = null,
     val audio: AudioReading? = null,
+    val touch: TouchReading? = null,
     val sensors: Map<String, SensorReading> = emptyMap(),
     val camera_meta: CameraMeta? = null,
     val usb: UsbOverview? = null,

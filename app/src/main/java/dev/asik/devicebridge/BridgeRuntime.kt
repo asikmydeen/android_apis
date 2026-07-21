@@ -9,6 +9,7 @@ import dev.asik.devicebridge.collectors.LocationCollector
 import dev.asik.devicebridge.collectors.NetworkCollector
 import dev.asik.devicebridge.collectors.SensorCollector
 import dev.asik.devicebridge.collectors.TelephonyCollector
+import dev.asik.devicebridge.collectors.TouchCollector
 import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
@@ -53,6 +54,8 @@ object BridgeRuntime {
         private set
     lateinit var audioCollector: AudioCollector
         private set
+    lateinit var touchCollector: TouchCollector
+        private set
     lateinit var cameraCollector: CameraCollector
         private set
     lateinit var usbCollector: UsbCollector
@@ -89,6 +92,7 @@ object BridgeRuntime {
         networkCollector = NetworkCollector(app, hub)
         telephonyCollector = TelephonyCollector(app, hub, scope)
         audioCollector = AudioCollector(app, hub, scope)
+        touchCollector = TouchCollector(app, hub)
         cameraCollector = CameraCollector(app, hub)
         usbCollector = UsbCollector(app, hub, scope)
         refreshNetworkConfigFromPrefs()
@@ -169,6 +173,7 @@ object BridgeRuntime {
         if (BridgePrefs.streamSensors(ctx)) sensorCollector.start()
         if (BridgePrefs.streamLocation(ctx)) locationCollector.start()
         if (BridgePrefs.streamAudio(ctx)) audioCollector.start()
+        if (BridgePrefs.streamTouch(ctx)) touchCollector.start()
         networkCollector.start()
         telephonyCollector.start()
         if (BridgePrefs.streamUsb(ctx)) usbCollector.start()
@@ -179,6 +184,7 @@ object BridgeRuntime {
         sensorCollector.stop()
         locationCollector.stop()
         audioCollector.stop()
+        touchCollector.stop()
         networkCollector.stop()
         telephonyCollector.stop()
         usbCollector.stop()

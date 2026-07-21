@@ -40,6 +40,7 @@ object BridgePrefs {
     private const val KEY_STREAM_LOCATION = "stream_location"
     private const val KEY_STREAM_SENSORS = "stream_sensors"
     private const val KEY_STREAM_AUDIO = "stream_audio"
+    private const val KEY_STREAM_TOUCH = "stream_touch"
     private const val KEY_STREAM_USB = "stream_usb"
 
     private val _themeModeFlow = MutableStateFlow(ThemeMode.SYSTEM)
@@ -169,6 +170,13 @@ object BridgePrefs {
 
     fun setStreamAudio(context: Context, v: Boolean) {
         prefs(context).edit().putBoolean(KEY_STREAM_AUDIO, v).apply()
+    }
+
+    fun streamTouch(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STREAM_TOUCH, true)
+
+    fun setStreamTouch(context: Context, v: Boolean) {
+        prefs(context).edit().putBoolean(KEY_STREAM_TOUCH, v).apply()
     }
 
     fun streamUsb(context: Context): Boolean =

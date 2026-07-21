@@ -60,6 +60,7 @@ fun SettingsScreen() {
     var streamLoc by remember { mutableStateOf(BridgePrefs.streamLocation(context)) }
     var streamSensors by remember { mutableStateOf(BridgePrefs.streamSensors(context)) }
     var streamAudio by remember { mutableStateOf(BridgePrefs.streamAudio(context)) }
+    var streamTouch by remember { mutableStateOf(BridgePrefs.streamTouch(context)) }
     var streamUsb by remember { mutableStateOf(BridgePrefs.streamUsb(context)) }
     var portText by remember { mutableStateOf(BridgePrefs.port(context).toString()) }
     var authLocal by remember {
@@ -191,6 +192,10 @@ fun SettingsScreen() {
                 PrefSwitch("Microphone", streamAudio) {
                     streamAudio = it
                     BridgePrefs.setStreamAudio(context, it)
+                }
+                PrefSwitch("Touchscreen", streamTouch) {
+                    streamTouch = it
+                    BridgePrefs.setStreamTouch(context, it)
                 }
                 PrefSwitch("USB", streamUsb) {
                     streamUsb = it
