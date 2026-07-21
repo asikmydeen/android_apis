@@ -321,7 +321,7 @@ def bar_chart(val: float, max_val: float, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def render_screen_pad(touch: TouchState, width: int = 22, height: int = 8) -> List[str]:
+def render_screen_pad(touch: TouchState, width: int = 24, height: int = 8) -> List[str]:
     """Draws an ASCII smartphone display pad showing real-time touch coordinates."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
     now = time.time()
@@ -335,7 +335,7 @@ def render_screen_pad(touch: TouchState, width: int = 22, height: int = 8) -> Li
             grid[row][col] = "•" if age < 0.8 else "·"
 
     # Draw active touch pointer
-    if (now - touch.last_touch_time) <= 1.5:
+    if (now - touch.last_touch_time) <= 2.5:
         col = int(touch.x_norm * (width - 1))
         row = int(touch.y_norm * (height - 1))
         col = max(0, min(width - 1, col))
@@ -447,7 +447,7 @@ def render_dashboard(
     g_bar = bar_chart(metrics["g_mag"], 20.0, 10)
 
     # ASCII Screen Pad
-    screen_pad = render_screen_pad(touch, width=22, height=6)
+    screen_pad = render_screen_pad(touch, width=24, height=8)
 
     # Layout Row: Sensors on Left, ASCII Touch Screen on Right
     lines.append(
@@ -469,6 +469,15 @@ def render_dashboard(
     )
     lines.append(
         f"  {C_GRAY}{t_str:<32}{RESET} {screen_pad[5]}"
+    )
+    lines.append(
+        f"  {'':<39} {screen_pad[6]}"
+    )
+    lines.append(
+        f"  {'':<39} {screen_pad[7]}"
+    )
+    lines.append(
+        f"  {'':<39} {screen_pad[8]}"
     )
 
     gestures_str = "  ".join([f"⚡ {g}" for g in metrics["recent_gestures"][-3:]]) or "None"
