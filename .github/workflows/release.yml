@@ -1,0 +1,76 @@
+name: Build & Release APK / AAB
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build APK and AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build Debug & Release APK, and Release AAB
+        run: |
+          ./gradlew :app:assembleDebug :app:assembleRelease :app:bundleRelease
+
+      - name: Prepare Release Artifacts
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/debug/app-debug.apk release-assets/DeviceBridge-debug.apk
+          if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            cp app/build/outputs/apk/release/app-release-unsigned.apk release-assets/DeviceBridge-release-unsigned.apk
+          elif [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk release-assets/DeviceBridge-release.apk
+          fi
+          if [ -f app/build/outputs/bundle/release/app-release.aab ]; then
+            cp app/build/outputs/bundle/release/app-release.aab release-assets/DeviceBridge-release.aab
+          fi
+
+      - name: Extract Version Name from app/build.gradle.kts
+        id: get_version
+        run: |
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts || echo "1.3.0")
+          echo "VERSION_NAME=v$VERSION" >> $GITHUB_ENV
+          echo "TAG_NAME=v$VERSION-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Device Bridge ${{ env.VERSION_NAME }} (${{ github.sha }})
+          body: |
+            Automated build for commit `${{ github.sha }}` on branch `main`.
+            
+            ### Downloads
+            - **DeviceBridge-debug.apk**: Ready to install on Android device.
+            - **DeviceBridge-release-unsigned.apk**: Unsigned release APK.
+            - **DeviceBridge-release.aab**: Release App Bundle for Google Play.
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
