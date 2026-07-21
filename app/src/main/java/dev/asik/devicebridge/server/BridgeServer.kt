@@ -17,18 +17,23 @@ import dev.asik.devicebridge.model.SimpleStatus
 import dev.asik.devicebridge.model.StreamEnvelope
 import dev.asik.devicebridge.util.DiagnosticsBuilder
 import dev.asik.devicebridge.util.ErrorLog
+import dev.asik.devicebridge.util.NetworkAddresses
 import dev.asik.devicebridge.util.PermissionHelper
 import dev.asik.devicebridge.util.TimeUtil
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.header
+import io.ktor.server.request.path
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
@@ -66,6 +71,10 @@ class BridgeServer(
     private val port: Int,
     private val version: String,
     private val startedAtMsProvider: () -> Long,
+    private val authToken: String?,
+    private val authEnabled: Boolean,
+    private val networkMode: String,
+    private val publicUrlProvider: () -> String,
 ) {
     private val json = Json {
         prettyPrint = false
@@ -99,14 +108,41 @@ class BridgeServer(
                 }
             }
 
+            // Bearer auth when enabled (always for LAN / Tailscale / Cloudflare modes)
+            intercept(ApplicationCallPipeline.Call) {
+                if (!authEnabled || authToken.isNullOrBlank()) return@intercept
+                val path = call.request.path()
+                // Allow unauthenticated human landing page only
+                if (path == "/" || path.isEmpty()) return@intercept
+                if (!authorized(call)) {
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ApiErrorBody(
+                            ApiError(
+                                code = "unauthorized",
+                                message = "Missing or invalid token. Use Authorization: Bearer <token> or ?token=",
+                            ),
+                        ),
+                    )
+                    finish()
+                }
+            }
+
             routing {
                 get("/") {
                     call.respondText(
-                        """
-                        Device Bridge $version
-                        See GET /v1/health, /v1/capabilities, /v1/snapshot
-                        Base: http://$bindHost:$port
-                        """.trimIndent(),
+                        buildString {
+                            appendLine("Device Bridge $version")
+                            appendLine("mode=$networkMode bind=$bindHost port=$port auth=$authEnabled")
+                            appendLine("Local: http://127.0.0.1:$port")
+                            NetworkAddresses.lanIps().forEach { appendLine("LAN: http://$it:$port") }
+                            NetworkAddresses.tailscaleIps().forEach { appendLine("Tailscale: http://$it:$port") }
+                            val pub = publicUrlProvider()
+                            if (pub.isNotBlank()) appendLine("Public: $pub")
+                            appendLine()
+                            appendLine("GET /v1/health  /v1/diagnostics  /v1/snapshot  /v1/config")
+                            if (authEnabled) appendLine("Auth: Authorization: Bearer <token>")
+                        },
                         ContentType.Text.Plain,
                     )
                 }
@@ -142,13 +178,33 @@ class BridgeServer(
                 }
 
                 get("/v1/config") {
+                    val pub = publicUrlProvider().ifBlank { null }
+                    val lan = NetworkAddresses.lanIps().map { "http://$it:$port" }
+                    val ts = NetworkAddresses.tailscaleIps().map { "http://$it:$port" }
+                    val all = buildList {
+                        add("http://127.0.0.1:$port")
+                        addAll(lan)
+                        addAll(ts)
+                        if (pub != null) add(0, pub)
+                    }.distinct()
                     call.respond(
                         ConfigResponse(
                             bind = bindHost,
                             port = port,
-                            base_url = "http://$bindHost:$port",
-                            auth_enabled = false,
+                            base_url = "http://127.0.0.1:$port",
+                            auth_enabled = authEnabled,
+                            auth_required_hint = if (authEnabled) {
+                                "Authorization: Bearer <token>  or  ?token="
+                            } else {
+                                null
+                            },
                             version = version,
+                            network_mode = networkMode,
+                            public_url = pub,
+                            lan_urls = lan,
+                            tailscale_urls = ts,
+                            all_urls = all,
+                            cloudflared_command = "cloudflared tunnel --url http://127.0.0.1:$port",
                         ),
                     )
                 }
@@ -690,5 +746,17 @@ class BridgeServer(
 
     private suspend fun io.ktor.websocket.DefaultWebSocketServerSession.sendJson(envelope: StreamEnvelope) {
         send(Frame.Text(json.encodeToString(envelope)))
+    }
+
+    private fun authorized(call: ApplicationCall): Boolean {
+        val expected = authToken ?: return true
+        val header = call.request.header("Authorization")
+        if (header != null && header.startsWith("Bearer ", ignoreCase = true)) {
+            if (header.substring(7).trim() == expected) return true
+        }
+        val q = call.request.queryParameters["token"]
+        if (q != null && q == expected) return true
+        // WebSocket clients often pass token as query
+        return false
     }
 }

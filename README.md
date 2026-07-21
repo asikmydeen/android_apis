@@ -26,9 +26,9 @@ Full design: [PLAN.md](./PLAN.md)
 | **Diagnostics / stale location / USB reconnect** | Yes (v1.2) |
 | Boot start + battery unrestricted hint | Yes (v1.2) |
 | Termux `scripts/bridge` helper (retry + cache) | Yes (v1.2) |
-| Compose UI: permissions, start/stop, live status | Yes |
+| **UI: Home / Remote / Devices / Settings** | Yes (v1.3) |
+| **Remote: Local · LAN · Tailscale · Cloudflare + token auth** | Yes (v1.3) |
 | Bluetooth scan / GATT | Planned |
-| Bearer auth / LAN bind | Planned (defaults: localhost, no auth) |
 
 ---
 
@@ -99,6 +99,22 @@ curl -s http://127.0.0.1:8765/v1/snapshot | jq .
 | WS | `/v1/stream?topics=location,battery,sensors,network,usb` | Multiplex stream |
 | WS | `/v1/stream/location` | Location only |
 | WS | `/v1/stream/sensors` | Sensors only |
+
+### Remote access (internet)
+
+See **[docs/REMOTE_ACCESS.md](./docs/REMOTE_ACCESS.md)**.
+
+| Mode | How |
+|------|-----|
+| **Tailscale** | Install Tailscale app → Remote tab → mode Tailscale → use `http://100.x.x.x:8765` + Bearer token |
+| **Cloudflare** | Mode Cloudflare → Termux `./scripts/cloudflared-quick.sh` → paste URL in app → curl with token |
+| **LAN** | Mode LAN → `http://192.168.x.x:8765` + token |
+
+```bash
+export BRIDGE=https://xxxx.trycloudflare.com
+export BRIDGE_TOKEN=your_token_from_app
+./scripts/bridge snapshot
+```
 
 ### Failure / diagnostics
 

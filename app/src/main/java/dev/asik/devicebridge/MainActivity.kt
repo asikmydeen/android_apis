@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dev.asik.devicebridge.ui.DeviceBridgeAppUi
 import dev.asik.devicebridge.ui.theme.DeviceBridgeTheme
+// DeviceBridgeAppUi: bottom nav Home / Remote / Devices / Settings
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {

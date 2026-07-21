@@ -11,7 +11,9 @@ import dev.asik.devicebridge.collectors.TelephonyCollector
 import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
+import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.ErrorLog
+import dev.asik.devicebridge.util.NetworkAddresses
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,14 +21,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Process-wide runtime shared by the UI and foreground service.
  */
 object BridgeRuntime {
-    const val DEFAULT_BIND = "127.0.0.1"
-    const val DEFAULT_PORT = 8765
-    const val VERSION = "1.2.0"
+    const val VERSION = "1.3.0"
 
     private val job = SupervisorJob()
     val scope = CoroutineScope(job + Dispatchers.Default)
@@ -54,6 +56,7 @@ object BridgeRuntime {
         private set
 
     private var server: BridgeServer? = null
+    private val serverMutex = Mutex()
 
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
@@ -61,10 +64,16 @@ object BridgeRuntime {
     private val _startedAtMs = MutableStateFlow(0L)
     val startedAtMs: StateFlow<Long> = _startedAtMs.asStateFlow()
 
-    val bindHost: String = DEFAULT_BIND
-    val port: Int = DEFAULT_PORT
+    private val _bindHost = MutableStateFlow("127.0.0.1")
+    val bindHostState: StateFlow<String> = _bindHost.asStateFlow()
 
-    fun baseUrl(): String = "http://$bindHost:$port"
+    private val _port = MutableStateFlow(8765)
+    val portState: StateFlow<Int> = _port.asStateFlow()
+
+    fun bindHost(): String = _bindHost.value
+    fun port(): Int = _port.value
+
+    fun baseUrl(): String = "http://127.0.0.1:${port()}"
 
     fun init(context: Context) {
         if (appContext != null) return
@@ -78,49 +87,86 @@ object BridgeRuntime {
         telephonyCollector = TelephonyCollector(app, hub, scope)
         cameraCollector = CameraCollector(app, hub)
         usbCollector = UsbCollector(app, hub, scope)
+        refreshNetworkConfigFromPrefs()
     }
 
     fun requireContext(): Context =
         appContext ?: error("BridgeRuntime not initialized")
 
+    fun refreshNetworkConfigFromPrefs() {
+        val ctx = appContext ?: return
+        _bindHost.value = BridgePrefs.bindHost(ctx)
+        _port.value = BridgePrefs.port(ctx)
+    }
+
+    fun accessUrls(): List<String> {
+        val ctx = appContext ?: return listOf(baseUrl())
+        val p = port()
+        val urls = NetworkAddresses.urlsForPort(p).toMutableList()
+        val publicUrl = BridgePrefs.publicUrl(ctx)
+        if (publicUrl.isNotBlank()) urls.add(0, publicUrl)
+        return urls.distinct()
+    }
+
+    fun cloudflaredCommand(): String =
+        "cloudflared tunnel --url http://127.0.0.1:${port()}"
+
     suspend fun startServer() {
-        init(requireContext())
-        if (server != null) {
-            _running.value = true
-            return
-        }
-        startCollectors()
-        val s = BridgeServer(
-            context = requireContext(),
-            hub = hub,
-            capabilityScanner = capabilityScanner,
-            cameraCollector = cameraCollector,
-            usbCollector = usbCollector,
-            bindHost = bindHost,
-            port = port,
-            version = VERSION,
-            startedAtMsProvider = { _startedAtMs.value },
-        )
-        try {
-            s.start()
-            server = s
-            _startedAtMs.value = System.currentTimeMillis()
-            _running.value = true
-            ErrorLog.info("server_start", "Ktor listening on $bindHost:$port")
-        } catch (e: Exception) {
-            ErrorLog.error("server_start_failed", e.message ?: "start failed")
-            stopCollectors()
-            throw e
+        serverMutex.withLock {
+            init(requireContext())
+            refreshNetworkConfigFromPrefs()
+            if (server != null) {
+                _running.value = true
+                return
+            }
+            startCollectors()
+            val ctx = requireContext()
+            val bind = BridgePrefs.bindHost(ctx)
+            val p = BridgePrefs.port(ctx)
+            val auth = BridgePrefs.authEnabled(ctx)
+            val token = if (auth) BridgePrefs.authToken(ctx) else null
+            _bindHost.value = bind
+            _port.value = p
+            val s = BridgeServer(
+                context = ctx,
+                hub = hub,
+                capabilityScanner = capabilityScanner,
+                cameraCollector = cameraCollector,
+                usbCollector = usbCollector,
+                bindHost = bind,
+                port = p,
+                version = VERSION,
+                startedAtMsProvider = { _startedAtMs.value },
+                authToken = token,
+                authEnabled = auth,
+                networkMode = BridgePrefs.networkMode(ctx).name,
+                publicUrlProvider = { BridgePrefs.publicUrl(ctx) },
+            )
+            try {
+                s.start()
+                server = s
+                _startedAtMs.value = System.currentTimeMillis()
+                _running.value = true
+                ErrorLog.info(
+                    "server_start",
+                    "listening $bind:$p mode=${BridgePrefs.networkMode(ctx)} auth=$auth",
+                )
+            } catch (e: Exception) {
+                ErrorLog.error("server_start_failed", e.message ?: "start failed")
+                stopCollectors()
+                throw e
+            }
         }
     }
 
     fun startCollectors() {
+        val ctx = requireContext()
         batteryCollector.start()
-        sensorCollector.start()
-        locationCollector.start()
+        if (BridgePrefs.streamSensors(ctx)) sensorCollector.start()
+        if (BridgePrefs.streamLocation(ctx)) locationCollector.start()
         networkCollector.start()
         telephonyCollector.start()
-        usbCollector.start()
+        if (BridgePrefs.streamUsb(ctx)) usbCollector.start()
     }
 
     fun stopCollectors() {
@@ -133,12 +179,25 @@ object BridgeRuntime {
     }
 
     suspend fun stopServer() {
-        server?.stop()
-        server = null
-        stopCollectors()
-        _running.value = false
-        _startedAtMs.value = 0L
-        ErrorLog.info("server_stop", "Bridge stopped")
+        serverMutex.withLock {
+            server?.stop()
+            server = null
+            stopCollectors()
+            _running.value = false
+            _startedAtMs.value = 0L
+            ErrorLog.info("server_stop", "Bridge stopped")
+        }
+    }
+
+    /** Apply prefs and bounce the server if it was running. */
+    suspend fun restartServerIfRunning() {
+        val was = _running.value
+        if (was) {
+            stopServer()
+            startServer()
+        } else {
+            refreshNetworkConfigFromPrefs()
+        }
     }
 
     fun dispose() {

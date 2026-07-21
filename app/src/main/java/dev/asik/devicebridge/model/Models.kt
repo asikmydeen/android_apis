@@ -311,7 +311,14 @@ data class ConfigResponse(
     val port: Int,
     val base_url: String,
     val auth_enabled: Boolean,
+    val auth_required_hint: String? = null,
     val version: String,
+    val network_mode: String = "LOCAL",
+    val public_url: String? = null,
+    val lan_urls: List<String> = emptyList(),
+    val tailscale_urls: List<String> = emptyList(),
+    val all_urls: List<String> = emptyList(),
+    val cloudflared_command: String? = null,
 )
 
 @Serializable
