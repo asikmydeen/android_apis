@@ -287,101 +287,65 @@ def extract_from_sensors_map(
 
 
 def scale_for(level: str) -> float:
-    """How many m/s² map to full bar half-width (smaller = more sensitive)."""
+    """m/s² that maps to full visual deflection (smaller = more sensitive)."""
     if level == "ultra":
-        return 0.12
+        return 0.10
     if level == "high":
-        return 0.35
-    return 1.2
+        return 0.28
+    return 1.0
 
 
-def gyro_scale(level: str) -> float:
-    if level == "ultra":
-        return 0.08
-    if level == "high":
-        return 0.25
-    return 0.8
+# Soft palette indices (256-color) — calm dusk / water glass
+PAL_DUST = (60, 61, 67, 103, 109, 146, 152, 189, 195, 231)
+PAL_AURORA = (54, 55, 61, 97, 103, 140, 146, 183, 189, 225)
 
 
-# ── bidirectional soft bar ─────────────────────────────────────────────────
-
-def bipolar_bar(
-    value: float,
-    half: int,
-    full_scale: float,
-    color_neg: str,
-    color_pos: str,
-    color_mid: str,
-    use_color: bool,
-) -> str:
-    """
-    Centered bar:  LEFT ─────●───── RIGHT
-    value < 0 fills left; > 0 fills right. Soft block characters.
-    """
-    if full_scale <= 1e-9:
-        full_scale = 1.0
-    t = clamp(value / full_scale, -1.0, 1.0)
-    # smooth ease for ASMR feel
-    t = math.copysign(abs(t) ** 0.85, t)
-    n = int(round(abs(t) * half))
-    left = ["·"] * half
-    right = ["·"] * half
-    # gradient characters from soft to full
-    blocks = "⣀⣄⣤⣦⣶⣷⣿"
-    for i in range(n):
-        # denser toward the tip (direction of motion)
-        idx = min(len(blocks) - 1, int((i + 1) / max(1, n) * (len(blocks) - 1)))
-        ch = blocks[idx]
-        if t < 0:
-            left[half - 1 - i] = ch
-        else:
-            right[i] = ch
-    mid = "◆" if n > 0 else "◇"
-    if use_color:
-        ls = color_neg + "".join(left) + RESET
-        rs = color_pos + "".join(right) + RESET
-        m = color_mid + mid + RESET
-    else:
-        ls, rs, m = "".join(left), "".join(right), mid
-    return f"{ls}{m}{rs}"
+def fg(n: int) -> str:
+    return f"\033[38;5;{n}m"
 
 
-def sparkline(hist: Deque[float], width: int, use_color: str) -> str:
-    if not hist:
-        return "·" * width
-    chars = " ˑ˙·░▒▓█"
-    data = list(hist)[-width:]
-    while len(data) < width:
-        data.insert(0, 0.0)
-    mx = max(max(data), 1e-6)
-    out = []
-    for v in data:
-        idx = int(clamp(v / mx, 0, 1) * (len(chars) - 1))
-        out.append(chars[idx])
-    s = "".join(out)
-    return f"{use_color}{s}{RESET}" if use_color else s
+class Particle:
+    __slots__ = ("a", "b", "c", "phase", "speed", "size")
+
+    def __init__(self, i: int) -> None:
+        # quasi-random stable seeds from index
+        r = math.sin(i * 12.9898) * 43758.5453
+        r = r - math.floor(r)
+        self.a = r * math.pi * 2
+        r2 = math.sin(i * 78.233) * 43758.5453
+        r2 = r2 - math.floor(r2)
+        self.b = r2 * math.pi * 2
+        r3 = math.sin(i * 45.164) * 43758.5453
+        r3 = r3 - math.floor(r3)
+        self.c = r3 * math.pi * 2
+        self.phase = r * 6.28
+        self.speed = 0.35 + r2 * 0.9
+        self.size = 0.4 + r3 * 0.6
 
 
 class MotionState:
     def __init__(self) -> None:
         self.samples = 0
         self.t0 = time.time()
-        # smoothed axes (buttery)
         self.sx = self.sy = self.sz = 0.0
         self.gx = self.gy = self.gz = 0.0
         self.activity = 0.0
         self.last_lin: Optional[List[float]] = None
-        self.trail: Deque[float] = deque(maxlen=48)
+        self.trail: Deque[float] = deque(maxlen=64)
         self.dir_hold = "still"
         self.dir_hold_until = 0.0
-        self.breath = 0.0  # idle pulse
+        self.breath = 0.0
+        # 4th dimension = integrated rotation / time swirl
+        self.w = 0.0
+        self.particles = [Particle(i) for i in range(48)]
+        self.path: Deque[Tuple[float, float]] = deque(maxlen=28)  # projected trail
 
     def update(
         self,
         lin: Optional[List[float]],
         gyro: Optional[List[float]],
         acc: Optional[List[float]],
-        alpha: float = 0.28,
+        alpha: float = 0.22,
     ) -> Dict[str, Any]:
         lx = ly = lz = 0.0
         if lin and len(lin) >= 3:
@@ -390,7 +354,7 @@ class MotionState:
         if gyro and len(gyro) >= 3:
             rx, ry, rz = float(gyro[0]), float(gyro[1]), float(gyro[2])
 
-        # EMA smooth — ASMR glide
+        # very soft EMA for glass-smooth motion
         self.sx = ema(self.sx, lx, alpha)
         self.sy = ema(self.sy, ly, alpha)
         self.sz = ema(self.sz, lz, alpha)
@@ -410,11 +374,16 @@ class MotionState:
 
         lm = mag3(self.sx, self.sy, self.sz)
         gm = mag3(self.gx, self.gy, self.gz)
-        activity = math.sqrt(lm * lm + (gm * 1.8) ** 2 + (jerk * 2.5) ** 2)
-        self.activity = ema(self.activity, activity, 0.35)
+        activity = math.sqrt(lm * lm + (gm * 1.8) ** 2 + (jerk * 2.2) ** 2)
+        self.activity = ema(self.activity, activity, 0.28)
         self.trail.append(self.activity)
         self.samples += 1
-        self.breath = 0.5 + 0.5 * math.sin(time.time() * 1.4)
+        t = time.time()
+        self.breath = 0.5 + 0.5 * math.sin(t * 0.9)
+
+        # 4th axis: slow swirl from gyro + time (always gently alive)
+        self.w = ema(self.w, self.gz * 0.85 + self.gx * 0.2, 0.15)
+        self.w += 0.012  # eternal soft drift in w
 
         am = mag3(*(float(a) for a in acc[:3])) if acc and len(acc) >= 3 else 9.8
 
@@ -425,88 +394,190 @@ class MotionState:
             "gx": self.gx,
             "gy": self.gy,
             "gz": self.gz,
+            "w": self.w,
             "lin": lm,
             "gyro": gm,
             "jerk": jerk,
             "activity": self.activity,
             "acc": am,
-            "raw_lin": (lx, ly, lz),
         }
 
 
 def dominant_direction(sx: float, sy: float, sz: float, thr: float) -> Tuple[str, str]:
-    """
-    Phone coords (screen facing you, portrait):
-      +X right, -X left
-      +Y up (top of phone), -Y down
-      +Z toward you (out of screen), -Z away (into table)
-    """
     ax, ay, az = abs(sx), abs(sy), abs(sz)
     m = max(ax, ay, az)
     if m < thr:
-        return "still", "quietly resting…"
-
+        return "still", "the field is calm"
     if ax >= ay and ax >= az:
-        if sx > 0:
-            return "right", "soft drift  →  right"
-        return "left", "soft drift  ←  left"
+        return ("right", "flowing right  →") if sx > 0 else ("left", "flowing left  ←")
     if ay >= ax and ay >= az:
-        if sy > 0:
-            return "up", "lifting  ↑  toward sky / top"
-        return "down", "settling  ↓  toward ground"
-    if sz > 0:
-        return "toward", "drawing  ◎  toward you"
-    return "away", "pressing  ○  into the world"
+        return ("up", "rising  ↑") if sy > 0 else ("down", "sinking  ↓")
+    return ("toward", "blooming toward you  ◎") if sz > 0 else ("away", "dissolving away  ○")
 
 
-def mood_line(label: str, activity: float, breath: float) -> str:
-    if label == "still":
-        dots = "·" * (3 + int(breath * 3))
-        return f"still space  {dots}"
-    if activity < 0.08:
-        return "a whisper of motion…"
-    if activity < 0.25:
-        return "gentle sway…"
-    if activity < 0.8:
-        return "clear movement…"
-    if activity < 2.0:
-        return "alive · flowing…"
-    return "rush · cascade…"
+def project_4d(
+    x: float,
+    y: float,
+    z: float,
+    w: float,
+    t: float,
+    width: int,
+    height: int,
+) -> Tuple[int, int, float]:
+    """
+    Map 4D-ish point to 2D terminal cell.
+    Rotation in XW / YZ planes for a living hyperspace feel.
+    """
+    # unit-ish coordinates in -1..1
+    # rotate (x,w) and (y,z)
+    a = t * 0.35 + w * 0.8
+    ca, sa = math.cos(a), math.sin(a)
+    x1 = x * ca - w * sa
+    w1 = x * sa + w * ca
+    b = t * 0.22 + w * 0.5
+    cb, sb = math.cos(b), math.sin(b)
+    y1 = y * cb - z * sb
+    z1 = y * sb + z * cb
+
+    # perspective on z1
+    depth = 2.2 + z1 * 0.9 + w1 * 0.15
+    if depth < 0.35:
+        depth = 0.35
+    px = x1 / depth
+    py = y1 / depth
+
+    col = int((px * 0.45 + 0.5) * (width - 1))
+    row = int((-py * 0.45 + 0.5) * (height - 1))
+    col = int(clamp(col, 0, width - 1))
+    row = int(clamp(row, 0, height - 1))
+    # brightness from depth (closer = brighter)
+    bright = clamp(1.35 - depth * 0.35, 0.0, 1.0)
+    return col, row, bright
 
 
-def phone_glyph(sx: float, sy: float, sz: float, scale: float) -> List[str]:
-    """Tiny 7x5 ASCII phone that leans with motion."""
-    # map motion to cursor offset inside a small field
-    cx, cy = 5, 2
-    dx = int(clamp(sx / scale, -1, 1) * 3)
-    dy = int(clamp(-sy / scale, -1, 1) * 1)  # up is -row
-    px, py = cx + dx, cy + dy
-    rows = [[" " for _ in range(11)] for _ in range(5)]
-    # soft field dots
-    for y in range(5):
-        for x in range(11):
-            if (x + y) % 2 == 0:
-                rows[y][x] = "·"
-    # phone body
-    body = [
-        "╭───╮",
-        "│ · │",
-        "│   │",
-        "╰───╯",
-    ]
-    # place body centered at px,py
-    for i, line in enumerate(body):
-        yy = clamp(py - 1 + i, 0, 4)
-        for j, ch in enumerate(line):
-            xx = clamp(px - 2 + j, 0, 10)
-            if 0 <= int(yy) < 5 and 0 <= int(xx) < 11:
-                rows[int(yy)][int(xx)] = ch
-    # motion comet
-    if abs(sx) + abs(sy) + abs(sz) > scale * 0.15:
-        tx = clamp(px + (1 if sx > 0 else -1 if sx < 0 else 0), 0, 10)
-        ty = clamp(py + (-1 if sy > 0 else 1 if sy < 0 else 0), 0, 4)
-        rows[int(ty)][int(tx)] = "✦"
-    return ["".join(r) for r in rows]
+def render_field(
+    state: MotionState,
+    sx: float,
+    sy: float,
+    sz: float,
+    w_axis: float,
+    scale: float,
+    width: int,
+    height: int,
+    use_color: bool,
+) -> List[str]:
+    """Living particle cloud driven by motion (4 axes: x,y,z,w)."""
+    t = time.time() - state.t0
+    # motion offsets pull the whole cloud
+    ox = clamp(sx / scale, -1.5, 1.5)
+    oy = clamp(sy / scale, -1.5, 1.5)
+    oz = clamp(sz / scale, -1.5, 1.5)
+    breath = 0.85 + 0.15 * state.breath + clamp(state.activity * 0.4, 0, 0.35)
+
+    # grid of chars + brightness
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    bright = [[0.0 for _ in range(width)] for _ in range(height)]
+
+    # soft background star dust (always drifting)
+    for i in range(width * height // 7):
+        u = (math.sin(i * 3.1 + t * 0.15) + 1) * 0.5
+        v = (math.cos(i * 2.7 - t * 0.11) + 1) * 0.5
+        c = int(u * (width - 1))
+        r = int(v * (height - 1))
+        if grid[r][c] == " ":
+            grid[r][c] = "·"
+            bright[r][c] = 0.12 + 0.08 * math.sin(t + i)
+
+    glyphs = "·˙⋆✦✧ entrop"  # last chars unused; pick by brightness
+    gset = ["·", "˙", "⋆", "∙", "∘", "○", "◎", "✦", "✧", "❋"]
+
+    for i, p in enumerate(state.particles):
+        # particle orbits in 4D torus-like space
+        ang = p.phase + t * p.speed + w_axis * 0.4
+        rad = (0.35 + p.size * 0.55) * breath
+        # base on sphere/torus
+        x = math.cos(ang + p.a) * rad + ox * 0.55
+        y = math.sin(ang * 0.9 + p.b) * rad * 0.85 + oy * 0.55
+        z = math.sin(ang * 0.7 + p.c) * rad * 0.7 + oz * 0.55
+        ww = math.cos(ang * 0.5 + p.a) * 0.5 + w_axis * 0.15
+
+        col, row, br = project_4d(x, y, z, ww, t, width, height)
+        # activity blooms particles
+        br = clamp(br + state.activity * 0.5, 0, 1)
+        if br > bright[row][col]:
+            bright[row][col] = br
+            gi = int(br * (len(gset) - 1))
+            grid[row][col] = gset[gi]
+
+    # center “you” beacon — pulled by motion
+    cx = int(clamp((ox * 0.35 + 0.5) * (width - 1), 0, width - 1))
+    cy = int(clamp((-oy * 0.35 + 0.5) * (height - 1), 0, height - 1))
+    state.path.append((cx, cy))
+    for k, (px, py) in enumerate(state.path):
+        fade = (k + 1) / max(1, len(state.path))
+        if bright[py][px] < fade * 0.7:
+            bright[py][px] = fade * 0.7
+            grid[py][px] = "·" if fade < 0.5 else "∘"
+    grid[cy][cx] = "◉"
+    bright[cy][cx] = 1.0
+
+    # 4D axis guides at edges (subtle)
+    mid_r, mid_c = height // 2, width // 2
+    # horizontal = X
+    for c in range(width):
+        if grid[mid_r][c] == " ":
+            grid[mid_r][c] = "─" if abs(c - mid_c) > 2 else "┼"
+            bright[mid_r][c] = max(bright[mid_r][c], 0.15)
+    # vertical = Y
+    for r in range(height):
+        if grid[r][mid_c] in (" ", "─"):
+            grid[r][mid_c] = "│" if abs(r - mid_r) > 1 else "┼"
+            bright[r][mid_c] = max(bright[r][mid_c], 0.15)
+
+    lines: List[str] = []
+    for r in range(height):
+        parts: List[str] = []
+        for c in range(width):
+            ch = grid[r][c]
+            br = bright[r][c]
+            if not use_color or ch == " ":
+                parts.append(ch)
+                continue
+            # pick palette by depth/brightness + slight hue shift from w
+            pal = PAL_AURORA if (math.sin(w_axis + r * 0.1) > 0) else PAL_DUST
+            idx = int(clamp(br, 0, 1) * (len(pal) - 1))
+            parts.append(f"{fg(pal[idx])}{ch}{RESET}")
+        lines.append("".join(parts))
+    return lines
+
+
+def soft_axis_row(
+    label_neg: str,
+    label_pos: str,
+    value: float,
+    scale: float,
+    width: int,
+    use_color: bool,
+) -> str:
+    """Minimal calm meter under the field."""
+    half = width // 2
+    t = clamp(value / max(scale, 1e-6), -1, 1)
+    t = math.copysign(abs(t) ** 0.8, t)
+    n = int(round(abs(t) * (half - 1)))
+    cells = ["·"] * width
+    mid = half
+    cells[mid] = "│"
+    fill = "━"
+    if t < 0:
+        for i in range(n):
+            cells[mid - 1 - i] = fill
+    elif t > 0:
+        for i in range(n):
+            cells[mid + 1 + i] = fill
+    bar = "".join(cells)
+    if use_color:
+        bar = f"{C_DIM}{bar}{RESET}"
+    return f"  {C_DIM if use_color else ''}{label_neg:>5}{RESET if use_color else ''} {bar} {C_DIM if use_color else ''}{label_pos:<5}{RESET if use_color else ''}"
 
 
 def render(
@@ -518,96 +589,76 @@ def render(
     use_color: bool,
 ) -> str:
     sc = scale_for(sensitivity)
-    gsc = gyro_scale(sensitivity)
-    thr = sc * 0.12
-
+    thr = sc * 0.10
     sx, sy, sz = metrics["sx"], metrics["sy"], metrics["sz"]
-    key, phrase = dominant_direction(sx, sy, sz, thr)
+    w_axis = metrics.get("w", state.w)
 
-    # hold direction label briefly so it doesn't flicker (ASMRy stability)
+    key, phrase = dominant_direction(sx, sy, sz, thr)
     now = time.time()
     if key != "still":
         state.dir_hold = key
-        state.dir_hold_until = now + 0.35
+        state.dir_hold_until = now + 0.45
     elif now > state.dir_hold_until:
         state.dir_hold = "still"
-        phrase = "quietly resting…"
+        phrase = "the field is calm"
     else:
-        # keep last phrase-ish
         key = state.dir_hold
-        _, phrase = dominant_direction(sx, sy, sz, thr * 0.5)
-        if key == "still":
-            phrase = "quietly resting…"
+        if key != "still":
+            _, phrase = dominant_direction(sx, sy, sz, thr * 0.4)
 
-    def c(code: str) -> str:
-        return "" if not use_color else code
-
-    def bipolar(val: float, cn: str, cp: str) -> str:
-        return bipolar_bar(
-            val, half, sc, c(cn), c(cp), c(C_SOFT), use_color
-        )
-
-    lr = bipolar(sx, C_ROSE, C_SKY)
-    ud = bipolar(sy, C_PEACH, C_MINT)
-    za = bipolar(sz, C_LILAC, C_GLOW)
-
-    # gyro yaw-ish (z) for twist
-    twist = bipolar_bar(state.gz, half, gsc, c(C_WARM), c(C_LILAC), c(C_SOFT), use_color)
-
-    glyph = phone_glyph(sx, sy, sz, sc)
-    mood = mood_line(key if metrics["activity"] >= thr else "still", metrics["activity"], state.breath)
-    trail = sparkline(state.trail, half * 2 + 1, c(C_DIM) if use_color else "")
-
-    # direction compass line
-    compass = {
-        "still": f"        {c(C_DIM)}· quiet ·{RESET if use_color else ''}",
-        "left": f"   {c(C_ROSE)}◀ LEFT{RESET if use_color else 'LEFT'}     ",
-        "right": f"        {c(C_SKY)}RIGHT ▶{RESET if use_color else 'RIGHT'}",
-        "up": f"     {c(C_MINT)}▲ UP{RESET if use_color else 'UP'}      ",
-        "down": f"    {c(C_PEACH)}▼ DOWN{RESET if use_color else 'DOWN'}    ",
-        "toward": f"   {c(C_GLOW)}◎ toward you{RESET if use_color else 'toward'}",
-        "away": f"   {c(C_LILAC)}○ into world{RESET if use_color else 'away'}",
-    }.get(key, "")
+    # field size: wide and tall for immersion
+    field_w = max(48, half * 2 + 20)
+    field_h = 16
+    field = render_field(state, sx, sy, sz, w_axis, sc, field_w, field_h, use_color)
 
     elapsed = int(time.time() - state.t0)
-    title = f"{c(BOLD)}{c(C_SOFT)}motion veil{RESET if use_color else 'motion veil'}"
+    title = f"{BOLD}{C_SOFT}4·d  soft field{RESET}" if use_color else "4·d  soft field"
     meta = (
-        f"{c(C_DIM)}[{source}]  n={state.samples}  {sensitivity}  t={elapsed}s  "
-        f"act={metrics['activity']:.3f}{RESET if use_color else ''}"
+        f"{C_DIM}[{source}]  {sensitivity}  t={elapsed}s  "
+        f"act={metrics['activity']:.3f}  w={w_axis:.2f}{RESET}"
+        if use_color
+        else f"[{source}] act={metrics['activity']:.3f}"
     )
 
-    # build soft frame
-    w = half * 2 + 14
-    edge = "─" * min(48, w)
+    # gentle whisper line
+    whispers = {
+        "still": "breathe  ·  everything floats",
+        "left": "a tide to the left",
+        "right": "a tide to the right",
+        "up": "lifting like warm air",
+        "down": "settling like snow",
+        "toward": "the cloud leans into you",
+        "away": "the cloud slips into the dark",
+    }
+    whisper = whispers.get(key, phrase)
 
+    axis_w = min(41, field_w - 4)
     lines = [
         CLEAR + HIDE_CUR,
-        f"  {title}  {meta}",
-        f"  {c(C_DIM)}{edge}{RESET if use_color else ''}",
-        f"",
-        f"  {c(C_WARM)}{phrase}{RESET if use_color else phrase}",
-        f"  {compass}",
-        f"  {c(C_DIM)}{mood}{RESET if use_color else mood}",
-        f"",
-        f"  {c(C_DIM)}left ←{RESET if use_color else 'left'}  {lr}  {c(C_DIM)}→ right{RESET if use_color else 'right'}",
-        f"  {c(C_DIM)}down ←{RESET if use_color else 'down'}  {ud}  {c(C_DIM)}→ up{RESET if use_color else 'up'}",
-        f"  {c(C_DIM)}away ←{RESET if use_color else 'away'}  {za}  {c(C_DIM)}→ toward you{RESET if use_color else 'toward'}",
-        f"  {c(C_DIM)}twist{RESET if use_color else 'twist'}  {twist}",
-        f"",
-        f"  {c(C_DIM)}flow {trail}{RESET if use_color else ''}",
-        f"",
+        f"  {title}   {meta}",
+        f"  {C_WARM if use_color else ''}{whisper}{RESET if use_color else ''}",
+        f"  {C_DIM if use_color else ''}x y z  ·  w = time·twist (4th axis){RESET if use_color else ''}",
+        "",
     ]
-    for row in glyph:
-        lines.append(f"       {c(C_GLOW)}{row}{RESET if use_color else row}")
+    # frame the field
+    border = "─" * field_w
+    lines.append(f"  {C_DIM if use_color else ''}╭{border}╮{RESET if use_color else ''}")
+    for row in field:
+        lines.append(f"  {C_DIM if use_color else ''}│{RESET if use_color else ''}{row}{C_DIM if use_color else ''}│{RESET if use_color else ''}")
+    lines.append(f"  {C_DIM if use_color else ''}╰{border}╯{RESET if use_color else ''}")
     lines += [
-        f"",
-        f"  {c(C_DIM)}x={sx:+.3f}  y={sy:+.3f}  z={sz:+.3f}  m/s² (smoothed linear){RESET if use_color else ''}",
-        f"  {c(C_DIM)}|a|={metrics['acc']:.2f} (gravity~9.8)  gyro={metrics['gyro']:.3f}{RESET if use_color else ''}",
-        f"",
-        f"  {c(C_DIM)}nudge · breathe · tilt — micro moves light the bars{RESET if use_color else ''}",
-        f"  {c(C_DIM)}Ctrl+C to leave quietly{RESET if use_color else 'Ctrl+C quit'}",
+        "",
+        soft_axis_row("left", "right", sx, sc, axis_w, use_color),
+        soft_axis_row("down", "up", sy, sc, axis_w, use_color),
+        soft_axis_row("away", "near", sz, sc, axis_w, use_color),
+        soft_axis_row("back", "spin", state.gz, sc * 0.8, axis_w, use_color),
+        "",
+        f"  {C_DIM if use_color else ''}◉ you   ✦ particles in 4d   │ cross = x/y plane{RESET if use_color else ''}",
+        f"  {C_DIM if use_color else ''}move the phone · the cloud follows · micro motion still counts{RESET if use_color else ''}",
+        f"  {C_DIM if use_color else ''}Ctrl+C  soft exit{RESET if use_color else ''}",
     ]
     return "\n".join(lines) + SHOW_CUR
+
 
 
 def explain_wait(err: BaseException, bridge: str, fail_streak: int) -> str:
@@ -750,8 +801,15 @@ def main() -> int:
     use_color = not args.no_color and sys.stdout.isatty()
     half = max(9, args.width)
 
+    # Timeouts: localhost can be tight; Tailscale needs headroom (relay, phone wake)
+    remote = not is_localhost_bridge(bridge)
+    timeout = args.timeout if args.timeout is not None else (12.0 if remote else 3.0)
+    interval = args.interval if args.interval is not None else (0.08 if remote else 0.04)
+
     def try_health(base: str, tok: str) -> Any:
-        return http_get_json(base.rstrip("/") + "/v1/health", tok, timeout=3.0)
+        # remote health also uses longer timeout
+        t = 12.0 if not is_localhost_bridge(base) else 3.0
+        return http_get_json(base.rstrip("/") + "/v1/health", tok, timeout=t)
 
     def prompt_token(reason: str) -> str:
         print(reason, file=sys.stderr)
@@ -893,10 +951,15 @@ def main() -> int:
 
     maybe_save_bridge(bridge)
 
+    # Recompute remote after possible URL prompt
+    remote = not is_localhost_bridge(bridge)
+    timeout = args.timeout if args.timeout is not None else (12.0 if remote else 3.0)
+    interval = args.interval if args.interval is not None else (0.08 if remote else 0.04)
+
     print(
         f"Bridge OK {bridge}  v{health.get('version')}  "
         f"{'degraded' if health.get('degraded') else 'smooth'}  "
-        f"sensitivity={args.sensitivity}",
+        f"sensitivity={args.sensitivity}  timeout={timeout:.0f}s",
         file=sys.stderr,
     )
 
@@ -907,7 +970,15 @@ def main() -> int:
                 return 0
             except Exception as e:
                 print(f"WebSocket skip ({e}); HTTP…", file=sys.stderr)
-        run_http(bridge, token, args.interval, half, args.sensitivity, use_color)
+        run_http(
+            bridge,
+            token,
+            interval,
+            half,
+            args.sensitivity,
+            use_color,
+            timeout=timeout,
+        )
     except KeyboardInterrupt:
         sys.stdout.write(SHOW_CUR + "\n  bye · soft exit\n")
         sys.stdout.flush()
