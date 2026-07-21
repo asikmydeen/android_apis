@@ -1,0 +1,16 @@
+default_platform(:android)
+
+platform :android do
+  desc "Build and upload App Bundle (.aab) to Google Play Console Internal Track"
+  lane :deploy_play_store do
+    gradle(
+      task: "clean bundleRelease",
+      project_dir: "app/"
+    )
+    upload_to_play_store(
+      track: "internal",
+      aab: "app/build/outputs/bundle/release/app-release.aab",
+      skip_upload_changelogs: false
+    )
+  end
+end

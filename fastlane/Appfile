@@ -1,0 +1,2 @@
+json_key_file("") # Path to Google Play Developer API service account JSON key file
+package_name("dev.asik.devicebridge")

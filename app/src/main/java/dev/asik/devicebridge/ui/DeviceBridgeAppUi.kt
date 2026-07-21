@@ -73,7 +73,7 @@ fun DeviceBridgeAppUi() {
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Device Bridge",
+                            "SensIO",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                         )

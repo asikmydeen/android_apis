@@ -1,0 +1,6 @@
+• Rebranded to SensIO!
+• Added Touchscreen & Touch Coordinates streaming API (/v1/touch & /v1/stream/touch)
+• Added AI Motion Agent supporting local Ollama & Hugging Face models (SmolLM2, Llama 3.2)
+• Added Dark Mode / Theme selection in Settings
+• Added CPU & Wi-Fi Keep-Alive locks for persistent background execution
+• Added One-Click Master Toggle to quickly start/stop the API service

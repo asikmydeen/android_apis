@@ -1,0 +1,16 @@
+SensIO turns your Android device into an ultra-low latency REST and WebSocket API server, giving local AI agents, LLMs, Termux environments, and custom scripts real-time physical senses!
+
+Stream live accelerometer, gyroscope, touch screen coordinates, microphone noise levels, high-precision GPS, USB host serial, battery status, and camera capture directly into local Python scripts, Node.js, or Ollama/HuggingFace AI models without any cloud dependencies.
+
+🚀 KEY FEATURES
+
+• High-Frequency IMU Stream (50Hz): Stream linear acceleration, raw gyroscope, orientation, and gravity vectors with micro-gesture detection.
+• Live Touchscreen Coordinates: Capture raw pixel touches (X, Y) and normalized coordinates across screen taps.
+• Local AI Agent Integration: Seamlessly feeds local LLMs (SmolLM2, Llama 3.2, Qwen) for real-time spatial intent reasoning and gesture action automation.
+• USB Host & Serial Bridge: Connect Arduino, FTDI, or USB storage devices and communicate directly over WebSockets.
+• Secure Remote Access: Built-in Tailscale VPN, Cloudflare Tunnel, and LAN networking modes with Bearer Token authentication.
+• 4D Motion Physics Engine: Control 4D spatial visualizers and games using physical phone tilt and roll rates.
+• Service Keep-Alive Protection: Runs as an unkillable foreground service with CPU WakeLock and Wi-Fi Lock.
+• Zero Cloud Privacy: All data stays strictly local on your private network or encrypted VPN tunnel.
+
+Ideal for developers, robotics engineers, AI researchers, and automation enthusiasts!

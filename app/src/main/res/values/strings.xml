@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Device Bridge</string>
-    <string name="notification_channel_name">Device Bridge service</string>
-    <string name="notification_channel_desc">Keeps the local API server running</string>
-    <string name="notification_title">Device Bridge active</string>
+    <string name="app_name">SensIO</string>
+    <string name="notification_channel_name">SensIO API service</string>
+    <string name="notification_channel_desc">Keeps the local SensIO API server running</string>
+    <string name="notification_title">SensIO API active</string>
     <string name="notification_text">API at http://127.0.0.1:8765</string>
     <string name="notification_stop">Stop</string>
 
@@ -12,12 +12,12 @@
     <string name="theme_light">Light Mode</string>
     <string name="theme_dark">Dark Mode</string>
 
-    <string name="master_toggle_start">Start Bridge Service</string>
-    <string name="master_toggle_stop">Stop Bridge Service</string>
+    <string name="master_toggle_start">Start SensIO Service</string>
+    <string name="master_toggle_stop">Stop SensIO Service</string>
 
     <string name="keep_alive_title">Service Protection &amp; Keep-Alive</string>
     <string name="keep_awake_label">Keep CPU &amp; Wi-Fi Awake</string>
     <string name="keep_awake_desc">Acquires WakeLock while active to prevent connections from dropping when screen is off.</string>
 
-    <string name="accessibility_service_desc">Streams global touch screen tap events to Device Bridge local API.</string>
+    <string name="accessibility_service_desc">Streams global touch screen tap events to SensIO local API.</string>
 </resources>

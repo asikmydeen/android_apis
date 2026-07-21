@@ -144,7 +144,7 @@ fun HomeScreen(onOpenRemote: () -> Unit) {
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            if (running) "API Bridge Active" else "Bridge Stopped",
+                            if (running) "SensIO Active" else "SensIO Stopped",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                         )

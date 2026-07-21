@@ -1,0 +1,1 @@
+Turn your phone into a live REST/WebSocket API & sensor hub for local AI agents.
