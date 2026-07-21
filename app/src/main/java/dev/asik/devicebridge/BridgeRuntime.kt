@@ -11,6 +11,7 @@ import dev.asik.devicebridge.collectors.TelephonyCollector
 import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
+import dev.asik.devicebridge.util.ErrorLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object BridgeRuntime {
     const val DEFAULT_BIND = "127.0.0.1"
     const val DEFAULT_PORT = 8765
-    const val VERSION = "1.1.0"
+    const val VERSION = "1.2.0"
 
     private val job = SupervisorJob()
     val scope = CoroutineScope(job + Dispatchers.Default)
@@ -100,10 +101,17 @@ object BridgeRuntime {
             version = VERSION,
             startedAtMsProvider = { _startedAtMs.value },
         )
-        s.start()
-        server = s
-        _startedAtMs.value = System.currentTimeMillis()
-        _running.value = true
+        try {
+            s.start()
+            server = s
+            _startedAtMs.value = System.currentTimeMillis()
+            _running.value = true
+            ErrorLog.info("server_start", "Ktor listening on $bindHost:$port")
+        } catch (e: Exception) {
+            ErrorLog.error("server_start_failed", e.message ?: "start failed")
+            stopCollectors()
+            throw e
+        }
     }
 
     fun startCollectors() {
@@ -130,6 +138,7 @@ object BridgeRuntime {
         stopCollectors()
         _running.value = false
         _startedAtMs.value = 0L
+        ErrorLog.info("server_stop", "Bridge stopped")
     }
 
     fun dispose() {

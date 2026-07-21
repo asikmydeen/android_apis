@@ -14,6 +14,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.model.LocationReading
+import dev.asik.devicebridge.util.ErrorLog
 import dev.asik.devicebridge.util.PermissionHelper
 
 class LocationCollector(
@@ -46,14 +47,22 @@ class LocationCollector(
     @SuppressLint("MissingPermission")
     fun start(intervalMs: Long = 2000L) {
         if (running) return
-        if (!PermissionHelper.hasLocation(context)) return
+        if (!PermissionHelper.hasLocation(context)) {
+            ErrorLog.warn("location_permission", "Location collector not started — permission denied")
+            return
+        }
         running = true
+        ErrorLog.info("location_start", "Location collector started")
 
-        // Last known quickly
+        // Last known quickly (may be stale — still useful)
         runCatching {
-            fused.lastLocation.addOnSuccessListener { loc ->
-                loc?.let { publish(it, "fused_last") }
-            }
+            fused.lastLocation
+                .addOnSuccessListener { loc ->
+                    loc?.let { publish(it, "fused_last") }
+                }
+                .addOnFailureListener { e ->
+                    ErrorLog.warn("location_last_failed", e.message ?: "lastLocation failed")
+                }
         }
 
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
@@ -64,7 +73,8 @@ class LocationCollector(
         try {
             fused.requestLocationUpdates(request, fusedCallback, Looper.getMainLooper())
             usingFused = true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            ErrorLog.warn("location_fused_failed", e.message ?: "fused failed; using LocationManager")
             usingFused = false
             startLegacy(intervalMs)
         }
@@ -106,6 +116,8 @@ class LocationCollector(
     }
 
     private fun publish(location: Location, provider: String) {
+        val now = System.currentTimeMillis()
+        val ageSec = if (location.time > 0) ((now - location.time) / 1000).coerceAtLeast(0) else 0L
         hub.publishLocation(
             LocationReading(
                 lat = location.latitude,
@@ -117,6 +129,9 @@ class LocationCollector(
                 provider = provider,
                 time_ms = location.time,
                 elapsed_realtime_nanos = location.elapsedRealtimeNanos,
+                received_at_ms = now,
+                stale = ageSec > 30,
+                age_sec = ageSec,
             ),
         )
     }

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Device Bridge CLI helper for Termux / Ubuntu (proot).
+# Retries HTTP, caches last good snapshot, prints diagnostics on failure.
+#
+# Usage:
+#   ./scripts/bridge health
+#   ./scripts/bridge diag
+#   ./scripts/bridge location
+#   ./scripts/bridge snapshot
+#   ./scripts/bridge usb
+#   ./scripts/bridge get /v1/sensors
+#   ./scripts/bridge watch          # poll health every 30s
+
+set -euo pipefail
+
+BRIDGE="${BRIDGE:-http://127.0.0.1:8765}"
+RETRIES="${RETRIES:-3}"
+TIMEOUT="${TIMEOUT:-3}"
+CACHE_DIR="${BRIDGE_CACHE:-${HOME}/.cache/device-bridge}"
+mkdir -p "$CACHE_DIR"
+
+red() { printf '%s\n' "$*" >&2; }
+
+http_get() {
+  local path="$1"
+  local url="${BRIDGE}${path}"
+  local i out
+  for i in $(seq 1 "$RETRIES"); do
+    if out=$(curl -sf --max-time "$TIMEOUT" "$url" 2>/dev/null); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+cmd_health() {
+  if out=$(http_get /v1/health); then
+    printf '%s\n' "$out"
+    if command -v jq >/dev/null 2>&1; then
+      deg=$(echo "$out" | jq -r '.degraded // false')
+      if [ "$deg" = "true" ]; then
+        red "warning: bridge degraded — run: $0 diag"
+      fi
+    fi
+  else
+    red '{"error":{"code":"bridge_down","hint":"Start Device Bridge app and keep the notification"}}'
+    red "Also try: $0 diag  (if server is up but unhealthy)"
+    exit 1
+  fi
+}
+
+cmd_diag() {
+  if out=$(http_get /v1/diagnostics); then
+    printf '%s\n' "$out" | tee "$CACHE_DIR/last-diagnostics.json"
+  else
+    if [ -f "$CACHE_DIR/last-diagnostics.json" ]; then
+      red "live diagnostics failed — showing cached:"
+      cat "$CACHE_DIR/last-diagnostics.json"
+    else
+      red '{"error":{"code":"bridge_down","hint":"Open Device Bridge → Start bridge"}}'
+    fi
+    exit 1
+  fi
+}
+
+cmd_snapshot() {
+  if out=$(http_get /v1/snapshot); then
+    printf '%s\n' "$out" | tee "$CACHE_DIR/last-snapshot.json"
+  else
+    if [ -f "$CACHE_DIR/last-snapshot.json" ]; then
+      red "live snapshot failed — showing cached last-snapshot.json"
+      cat "$CACHE_DIR/last-snapshot.json"
+      exit 2
+    fi
+    red '{"error":{"code":"bridge_down"}}'
+    exit 1
+  fi
+}
+
+cmd_location() {
+  if out=$(http_get /v1/location); then
+    printf '%s\n' "$out" | tee "$CACHE_DIR/last-location.json"
+    if command -v jq >/dev/null 2>&1; then
+      stale=$(echo "$out" | jq -r '.stale // false')
+      age=$(echo "$out" | jq -r '.age_sec // empty')
+      if [ "$stale" = "true" ]; then
+        red "warning: location is STALE (age_sec=${age:-?}) — last known fix returned"
+      fi
+    fi
+  else
+    if [ -f "$CACHE_DIR/last-location.json" ]; then
+      red "live location failed — cached:"
+      cat "$CACHE_DIR/last-location.json"
+      exit 2
+    fi
+    red '{"error":{"code":"no_location_or_bridge_down"}}'
+    exit 1
+  fi
+}
+
+cmd_usb() {
+  http_get /v1/usb || { red '{"error":{"code":"bridge_down"}}'; exit 1; }
+}
+
+cmd_log() {
+  http_get "/v1/debug/log?n=${1:-40}" || { red '{"error":{"code":"bridge_down"}}'; exit 1; }
+}
+
+cmd_get() {
+  local path="${1:?path required e.g. /v1/sensors}"
+  case "$path" in
+    /*) ;;
+    *) path="/$path" ;;
+  esac
+  http_get "$path" || { red '{"error":{"code":"bridge_down","path":"'"$path"'"}}'; exit 1; }
+}
+
+cmd_watch() {
+  while true; do
+    date -Iseconds 2>/dev/null || date
+    if http_get /v1/health >/dev/null; then
+      echo "ok"
+    else
+      red "DOWN — start Device Bridge"
+    fi
+    sleep 30
+  done
+}
+
+usage() {
+  cat <<EOF
+Device Bridge helper  (BRIDGE=$BRIDGE)
+
+  $0 health|diag|diagnostics|snapshot|location|usb|log|watch
+  $0 get /v1/path
+
+Env: BRIDGE RETRIES TIMEOUT BRIDGE_CACHE
+EOF
+}
+
+main() {
+  local cmd="${1:-health}"
+  shift || true
+  case "$cmd" in
+    health) cmd_health ;;
+    diag|diagnostics) cmd_diag ;;
+    snapshot) cmd_snapshot ;;
+    location|loc|gps) cmd_location ;;
+    usb) cmd_usb ;;
+    log) cmd_log "$@" ;;
+    get) cmd_get "$@" ;;
+    watch) cmd_watch ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

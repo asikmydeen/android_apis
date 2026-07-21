@@ -23,6 +23,9 @@ Full design: [PLAN.md](./PLAN.md)
 | Camera still capture `POST /v1/camera/{id}/capture` + `GET /v1/camera/last.jpg` | Yes |
 | **USB host**: list devices, storage volumes, attach events | Yes (v1.1) |
 | **USB serial** stream into Termux/Ubuntu via WebSocket | Yes (v1.1, CDC/bulk) |
+| **Diagnostics / stale location / USB reconnect** | Yes (v1.2) |
+| Boot start + battery unrestricted hint | Yes (v1.2) |
+| Termux `scripts/bridge` helper (retry + cache) | Yes (v1.2) |
 | Compose UI: permissions, start/stop, live status | Yes |
 | Bluetooth scan / GATT | Planned |
 | Bearer auth / LAN bind | Planned (defaults: localhost, no auth) |
@@ -96,6 +99,25 @@ curl -s http://127.0.0.1:8765/v1/snapshot | jq .
 | WS | `/v1/stream?topics=location,battery,sensors,network,usb` | Multiplex stream |
 | WS | `/v1/stream/location` | Location only |
 | WS | `/v1/stream/sensors` | Sensors only |
+
+### Failure / diagnostics
+
+```bash
+curl -s http://127.0.0.1:8765/v1/diagnostics | jq .
+curl -s http://127.0.0.1:8765/v1/debug/log | jq .
+# location always returns last known when available; check .stale and .age_sec
+curl -s http://127.0.0.1:8765/v1/location | jq .
+```
+
+Termux/Ubuntu helper (retries + caches last good snapshot):
+
+```bash
+chmod +x scripts/bridge
+./scripts/bridge health
+./scripts/bridge diag
+./scripts/bridge location
+./scripts/bridge snapshot   # falls back to ~/.cache/device-bridge/last-snapshot.json
+```
 
 ### USB → Linux (files + serial)
 

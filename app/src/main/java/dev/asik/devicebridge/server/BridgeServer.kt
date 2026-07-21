@@ -15,6 +15,8 @@ import dev.asik.devicebridge.model.DeviceSnapshot
 import dev.asik.devicebridge.model.HealthResponse
 import dev.asik.devicebridge.model.SimpleStatus
 import dev.asik.devicebridge.model.StreamEnvelope
+import dev.asik.devicebridge.util.DiagnosticsBuilder
+import dev.asik.devicebridge.util.ErrorLog
 import dev.asik.devicebridge.util.PermissionHelper
 import dev.asik.devicebridge.util.TimeUtil
 import io.ktor.http.ContentType
@@ -112,14 +114,31 @@ class BridgeServer(
                 get("/v1/health") {
                     val started = startedAtMsProvider()
                     val uptime = if (started > 0) (System.currentTimeMillis() - started) / 1000 else 0
+                    val diag = runCatching { DiagnosticsBuilder.build(context) }.getOrNull()
                     call.respond(
                         HealthResponse(
+                            ok = diag?.ok ?: true,
                             version = version,
                             uptime_sec = uptime,
                             server_time = TimeUtil.nowIso(),
                             running = true,
+                            degraded = diag?.degraded ?: false,
                         ),
                     )
+                }
+
+                get("/v1/diagnostics") {
+                    call.respond(DiagnosticsBuilder.build(context))
+                }
+
+                get("/v1/debug/log") {
+                    val n = call.request.queryParameters["n"]?.toIntOrNull() ?: 50
+                    call.respond(ErrorLog.recent(n))
+                }
+
+                post("/v1/debug/log/clear") {
+                    ErrorLog.clear()
+                    call.respond(SimpleStatus(true, "log cleared"))
                 }
 
                 get("/v1/config") {
@@ -143,7 +162,7 @@ class BridgeServer(
                 }
 
                 get("/v1/location") {
-                    val loc = hub.location.value
+                    val loc = DiagnosticsBuilder.enrichLocation(hub.location.value)
                     if (loc == null) {
                         if (!PermissionHelper.hasLocation(context)) {
                             call.respondPermissionDenied("ACCESS_FINE_LOCATION")
@@ -153,12 +172,13 @@ class BridgeServer(
                                 ApiErrorBody(
                                     ApiError(
                                         code = "no_fix",
-                                        message = "No location fix yet; keep the service running outdoors/with GPS on",
+                                        message = "No location fix yet (and no cached fix). Enable Location, go outdoors, keep bridge running.",
                                     ),
                                 ),
                             )
                         }
                     } else {
+                        // Always return last known; clients check `stale` / `age_sec`
                         call.respond(loc)
                     }
                 }
@@ -272,6 +292,10 @@ class BridgeServer(
                 // --- USB host: devices, storage volumes, serial ---
                 get("/v1/usb") {
                     call.respond(usbCollector.overview())
+                }
+
+                post("/v1/usb/rescan") {
+                    call.respond(usbCollector.rescan())
                 }
 
                 get("/v1/usb/devices") {
@@ -634,9 +658,13 @@ class BridgeServer(
         if (!PermissionHelper.hasCamera(context)) {
             errors += "camera: permission denied"
         }
+        val loc = DiagnosticsBuilder.enrichLocation(hub.location.value)
+        if (loc?.stale == true) {
+            errors += "location: stale (${loc.age_sec}s old) — still returning last known"
+        }
         return DeviceSnapshot(
             timestamp = TimeUtil.nowIso(),
-            location = hub.location.value,
+            location = loc,
             battery = hub.battery.value,
             network = hub.network.value,
             telephony = hub.telephony.value,

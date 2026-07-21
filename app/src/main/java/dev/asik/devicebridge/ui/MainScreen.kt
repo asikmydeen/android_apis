@@ -21,6 +21,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -30,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -38,6 +40,8 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dev.asik.devicebridge.BridgeRuntime
 import dev.asik.devicebridge.service.BridgeForegroundService
+import dev.asik.devicebridge.util.BridgePrefs
+import dev.asik.devicebridge.util.DiagnosticsBuilder
 import dev.asik.devicebridge.util.PermissionHelper
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalPermissionsApi::class)
@@ -52,6 +56,10 @@ fun DeviceBridgeAppUi() {
 
     val permissionState = rememberMultiplePermissionsState(PermissionHelper.runtimePermissions)
     var capsSummary by remember { mutableStateOf("—") }
+    var startOnBoot by remember { mutableStateOf(BridgePrefs.startOnBoot(context)) }
+    var batteryUnrestricted by remember {
+        mutableStateOf(DiagnosticsBuilder.isIgnoringBatteryOptimizations(context))
+    }
 
     LaunchedEffect(permissionState.allPermissionsGranted, running) {
         runCatching {
@@ -60,6 +68,7 @@ fun DeviceBridgeAppUi() {
                 "${caps.sensors.size} sensors · ${caps.cameras.size} cameras · " +
                     "loc providers: ${caps.location_providers.joinToString()}"
         }
+        batteryUnrestricted = DiagnosticsBuilder.isIgnoringBatteryOptimizations(context)
     }
 
     Scaffold(
@@ -109,15 +118,47 @@ fun DeviceBridgeAppUi() {
                         }
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        OutlinedButton(
-                            onClick = {
-                                runCatching {
-                                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                    context.startActivity(intent)
-                                }
+                        Text(
+                            if (batteryUnrestricted) {
+                                "Battery: unrestricted (good)"
+                            } else {
+                                "Battery: optimized — Samsung may kill the bridge"
                             },
-                        ) {
-                            Text("Battery optimization settings")
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    runCatching {
+                                        val intent = Intent(
+                                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                            Uri.parse("package:${context.packageName}"),
+                                        )
+                                        context.startActivity(intent)
+                                    }.onFailure {
+                                        runCatching {
+                                            context.startActivity(
+                                                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                                            )
+                                        }
+                                    }
+                                    batteryUnrestricted =
+                                        DiagnosticsBuilder.isIgnoringBatteryOptimizations(context)
+                                },
+                            ) {
+                                Text("Allow unrestricted battery")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                                        )
+                                    }
+                                },
+                            ) {
+                                Text("Battery settings")
+                            }
                         }
                     }
                 }
@@ -145,8 +186,23 @@ fun DeviceBridgeAppUi() {
                             Text("Stop bridge")
                         }
                     }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Start on boot", style = MaterialTheme.typography.bodyMedium)
+                        Switch(
+                            checked = startOnBoot,
+                            onCheckedChange = {
+                                startOnBoot = it
+                                BridgePrefs.setStartOnBoot(context, it)
+                            },
+                        )
+                    }
                     Text(
-                        "Keeps a foreground notification while the local API is up.",
+                        "Keeps a foreground notification while the local API is up. " +
+                            "If curl fails: GET /v1/diagnostics",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

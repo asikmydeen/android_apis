@@ -22,10 +22,12 @@ import dev.asik.devicebridge.model.UsbInterfaceInfo
 import dev.asik.devicebridge.model.UsbOverview
 import dev.asik.devicebridge.model.UsbSerialOpenResponse
 import dev.asik.devicebridge.model.UsbStorageVolume
+import dev.asik.devicebridge.util.ErrorLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -49,6 +51,10 @@ class UsbCollector(
     private var receiver: BroadcastReceiver? = null
 
     private val serialSessions = ConcurrentHashMap<String, SerialSession>()
+    /** deviceId -> baud for auto-reopen after unplug/replug or read failure */
+    private val reconnectBaud = ConcurrentHashMap<String, Int>()
+    /** vendor:product -> baud (survives deviceId changes across replug) */
+    private val reconnectByVidPid = ConcurrentHashMap<String, Int>()
 
     private val _serialLines = MutableSharedFlow<SerialChunk>(
         extraBufferCapacity = 64,
@@ -70,14 +76,24 @@ class UsbCollector(
                     UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                         val device = deviceFromIntent(intent)
                         val info = device?.let { toInfo(it) }
+                        ErrorLog.info("usb_attached", "USB attached ${info?.device_id} ${info?.product}")
                         hub.publishUsbEvent(UsbEvent(action = "attached", device = info))
                         hub.publishUsbOverview(overview())
+                        device?.let { tryAutoReconnect(it) }
                     }
                     UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         val device = deviceFromIntent(intent)
                         val id = device?.deviceId?.toString()
-                        if (id != null) closeSerial(id)
+                        if (id != null) {
+                            val baud = reconnectBaud[id]
+                            if (baud != null && device != null) {
+                                reconnectByVidPid[vidPidKey(device)] = baud
+                            }
+                            // Keep reconnectBaud so same id can reopen; also close session
+                            closeSerial(id, clearReconnect = false)
+                        }
                         val info = device?.let { toInfo(it) }
+                        ErrorLog.warn("usb_detached", "USB detached ${info?.device_id}")
                         hub.publishUsbEvent(UsbEvent(action = "detached", device = info))
                         hub.publishUsbOverview(overview())
                     }
@@ -85,6 +101,12 @@ class UsbCollector(
                         val device = deviceFromIntent(intent)
                         val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                         val info = device?.let { toInfo(it) }
+                        if (granted) {
+                            ErrorLog.info("usb_permission", "granted ${info?.device_id}")
+                            device?.let { tryAutoReconnect(it) }
+                        } else {
+                            ErrorLog.error("usb_permission_denied", "denied ${info?.device_id}")
+                        }
                         hub.publishUsbEvent(
                             UsbEvent(
                                 action = if (granted) "permission_granted" else "permission_denied",
@@ -104,13 +126,23 @@ class UsbCollector(
             context.registerReceiver(receiver, filter)
         }
         hub.publishUsbOverview(overview())
+        ErrorLog.info("usb_start", "USB collector started")
     }
 
     fun stop() {
-        serialSessions.keys.toList().forEach { closeSerial(it) }
+        serialSessions.keys.toList().forEach { closeSerial(it, clearReconnect = true) }
         receiver?.let { runCatching { context.unregisterReceiver(it) } }
         receiver = null
     }
+
+    fun rescan(): UsbOverview {
+        val o = overview()
+        hub.publishUsbOverview(o)
+        ErrorLog.info("usb_rescan", "devices=${o.device_count} volumes=${o.storage_volumes.size}")
+        return o
+    }
+
+    fun openSerialDeviceIds(): List<String> = serialSessions.keys().toList()
 
     fun overview(): UsbOverview {
         val devices = usbManager.deviceList.values.map { toInfo(it) }
@@ -158,47 +190,103 @@ class UsbCollector(
 
     fun openSerial(deviceId: String, baudRate: Int = 9600): UsbSerialOpenResponse {
         val device = findDevice(deviceId)
-            ?: return UsbSerialOpenResponse(false, deviceId, baudRate, "device not found", "")
+            ?: run {
+                ErrorLog.error("usb_not_found", "device $deviceId not connected")
+                return UsbSerialOpenResponse(
+                    false,
+                    deviceId,
+                    baudRate,
+                    "device not found — plug OTG device and GET /v1/usb/devices",
+                    "",
+                )
+            }
         if (!usbManager.hasPermission(device)) {
             requestPermission(deviceId)
+            ErrorLog.warn("usb_permission_required", "need permission for $deviceId")
             return UsbSerialOpenResponse(
                 false,
                 deviceId,
                 baudRate,
-                "USB permission required — accept the system dialog, then retry",
+                "USB permission required — accept the system dialog, then retry open",
                 "/v1/usb/serial/$deviceId",
             )
         }
-        closeSerial(deviceId)
+        closeSerial(deviceId, clearReconnect = false)
         val session = SerialSession(device, baudRate)
         try {
             session.open()
         } catch (e: Exception) {
+            ErrorLog.error("usb_serial_open_failed", e.message ?: "open failed", deviceId)
             return UsbSerialOpenResponse(
                 false,
                 deviceId,
                 baudRate,
-                e.message ?: "failed to open serial",
+                e.message
+                    ?: "failed to open serial (need bulk IN; mass-storage sticks use /v1/usb/storage + proot bind)",
                 "/v1/usb/serial/$deviceId",
             )
         }
         serialSessions[deviceId] = session
-        session.startReadLoop(scope) { chunk ->
-            _serialLines.tryEmit(chunk)
-            hub.publishUsbSerialChunk(chunk)
-        }
+        reconnectBaud[deviceId] = baudRate
+        reconnectByVidPid[vidPidKey(device)] = baudRate
+        session.startReadLoop(
+            scope = scope,
+            onChunk = { chunk ->
+                _serialLines.tryEmit(chunk)
+                hub.publishUsbSerialChunk(chunk)
+            },
+            onReadFailure = {
+                ErrorLog.warn("usb_serial_read_fail", "read failures on $deviceId — reconnecting")
+                hub.publishUsbEvent(
+                    UsbEvent(action = "serial_reconnecting", device = toInfo(device), message = "read failure"),
+                )
+                scope.launch {
+                    delay(500)
+                    runCatching { openSerial(deviceId, baudRate) }
+                }
+            },
+        )
+        ErrorLog.info("usb_serial_open", "opened $deviceId baud=$baudRate")
+        hub.publishUsbEvent(UsbEvent(action = "serial_opened", device = toInfo(device)))
         return UsbSerialOpenResponse(
             ok = true,
             device_id = deviceId,
             baud_rate = baudRate,
-            message = "serial open; stream at WS /v1/usb/serial/$deviceId or topic usb_serial",
+            message = "serial open; stream at WS /v1/usb/serial/$deviceId (auto-reconnect armed)",
             stream_ws = "/v1/usb/serial/$deviceId",
         )
     }
 
-    fun closeSerial(deviceId: String) {
+    fun closeSerial(deviceId: String, clearReconnect: Boolean = true) {
         serialSessions.remove(deviceId)?.close()
+        if (clearReconnect) {
+            reconnectBaud.remove(deviceId)
+        }
     }
+
+    private fun tryAutoReconnect(device: UsbDevice) {
+        val id = device.deviceId.toString()
+        val baud = reconnectBaud[id] ?: reconnectByVidPid[vidPidKey(device)] ?: return
+        if (!usbManager.hasPermission(device)) {
+            requestPermission(id)
+            return
+        }
+        scope.launch {
+            delay(300)
+            val result = openSerial(id, baud)
+            if (result.ok) {
+                ErrorLog.info("usb_serial_reconnect", "auto-reopened $id")
+                hub.publishUsbEvent(
+                    UsbEvent(action = "serial_reconnected", device = toInfo(device), message = "auto reopen ok"),
+                )
+            } else {
+                ErrorLog.warn("usb_serial_reconnect_failed", result.message)
+            }
+        }
+    }
+
+    private fun vidPidKey(device: UsbDevice): String =
+        "%04x:%04x".format(device.vendorId, device.productId)
 
     fun writeSerial(deviceId: String, data: ByteArray): Int {
         val session = serialSessions[deviceId] ?: error("serial not open for $deviceId")
@@ -413,25 +501,56 @@ class UsbCollector(
             epOut = outEp
         }
 
-        fun startReadLoop(scope: CoroutineScope, onChunk: (SerialChunk) -> Unit) {
+        fun startReadLoop(
+            scope: CoroutineScope,
+            onChunk: (SerialChunk) -> Unit,
+            onReadFailure: () -> Unit = {},
+        ) {
             val conn = connection ?: return
             val ep = epIn ?: return
             readJob = scope.launch(Dispatchers.IO) {
                 val buf = ByteArray(ep.maxPacketSize.coerceAtLeast(64))
+                var hardFails = 0
                 while (isActive) {
-                    val n = conn.bulkTransfer(ep, buf, buf.size, 500)
-                    if (n == null || n <= 0) continue
-                    val data = buf.copyOf(n)
-                    val text = runCatching { data.toString(Charsets.UTF_8) }.getOrNull()
-                        ?.takeIf { s -> s.all { ch -> ch.code == 9 || ch.code == 10 || ch.code == 13 || (ch.code in 32..126) } }
-                    onChunk(
-                        SerialChunk(
-                            deviceId = device.deviceId.toString(),
-                            base64 = Base64.encodeToString(data, Base64.NO_WRAP),
-                            text = text,
-                            bytes = n,
-                        ),
-                    )
+                    val n = try {
+                        conn.bulkTransfer(ep, buf, buf.size, 500)
+                    } catch (_: Exception) {
+                        -2
+                    }
+                    when {
+                        n == null || n == -1 -> {
+                            // timeout — normal when idle
+                            hardFails = 0
+                            continue
+                        }
+                        n <= 0 -> {
+                            hardFails++
+                            if (hardFails >= 8) {
+                                onReadFailure()
+                                break
+                            }
+                            delay(50)
+                            continue
+                        }
+                        else -> {
+                            hardFails = 0
+                            val data = buf.copyOf(n)
+                            val text = runCatching { data.toString(Charsets.UTF_8) }.getOrNull()
+                                ?.takeIf { s ->
+                                    s.all { ch ->
+                                        ch.code == 9 || ch.code == 10 || ch.code == 13 || (ch.code in 32..126)
+                                    }
+                                }
+                            onChunk(
+                                SerialChunk(
+                                    deviceId = device.deviceId.toString(),
+                                    base64 = Base64.encodeToString(data, Base64.NO_WRAP),
+                                    text = text,
+                                    bytes = n,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }

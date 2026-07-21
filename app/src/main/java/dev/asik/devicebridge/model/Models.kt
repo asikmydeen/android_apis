@@ -12,6 +12,61 @@ data class HealthResponse(
     val uptime_sec: Long,
     val server_time: String,
     val running: Boolean = true,
+    val degraded: Boolean = false,
+    val diagnostics_url: String = "/v1/diagnostics",
+)
+
+@Serializable
+data class LogEntry(
+    val ts: String,
+    val level: String,
+    val code: String,
+    val message: String,
+    val detail: String? = null,
+)
+
+@Serializable
+data class CollectorStatus(
+    val name: String,
+    val status: String,
+    val detail: String? = null,
+    val last_ok_age_sec: Long? = null,
+)
+
+@Serializable
+data class DiagnosticsResponse(
+    val ok: Boolean,
+    val degraded: Boolean,
+    val version: String,
+    val uptime_sec: Long,
+    val server_time: String,
+    val base_url: String,
+    val collectors: List<CollectorStatus>,
+    val location: LocationDiag? = null,
+    val usb: UsbDiag? = null,
+    val permissions: Map<String, String> = emptyMap(),
+    val battery_optimization_ignored: Boolean? = null,
+    val hints: List<String> = emptyList(),
+    val recent_errors: List<LogEntry> = emptyList(),
+)
+
+@Serializable
+data class LocationDiag(
+    val has_permission: Boolean,
+    val has_fix: Boolean,
+    val stale: Boolean = false,
+    val age_sec: Long? = null,
+    val provider: String? = null,
+    val accuracy_m: Float? = null,
+)
+
+@Serializable
+data class UsbDiag(
+    val host_supported: Boolean,
+    val device_count: Int,
+    val storage_volume_count: Int,
+    val serial_open: List<String> = emptyList(),
+    val last_event: String? = null,
 )
 
 @Serializable
@@ -80,6 +135,11 @@ data class LocationReading(
     val provider: String? = null,
     val time_ms: Long? = null,
     val elapsed_realtime_nanos: Long? = null,
+    /** Wall clock when the bridge received this fix. */
+    val received_at_ms: Long? = null,
+    /** True when serving a cached fix older than the freshness threshold. */
+    val stale: Boolean = false,
+    val age_sec: Long? = null,
 )
 
 @Serializable
