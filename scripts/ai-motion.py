@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-AI Motion & Spatial Context Agent for Device Bridge
+SensIO: AI Motion & Touch Spatial Reasoning Agent
 Powered by local LLM (Ollama / Hugging Face GGUF)
 
 Usage:
   export BRIDGE=http://asik-mydeens-z-fold7.hartley-beta.ts.net:8765
   export BRIDGE_TOKEN=703f8df3212f48719eeb3ef51ba01067
-  python3 scripts/ai-motion.py
-
-  Or specify CLI flags:
-  python3 scripts/ai-motion.py --bridge http://... --token ... --model smollm2:1.7b
+  ./scripts/ai-motion.sh
 """
 
 from __future__ import annotations
@@ -37,6 +34,7 @@ C_GREEN = "\033[38;5;120m"
 C_AMBER = "\033[38;5;215m"
 C_PURPLE = "\033[38;5;183m"
 C_MAGENTA = "\033[38;5;207m"
+C_ROSE = "\033[38;5;203m"
 C_GRAY = "\033[38;5;242m"
 CLEAR = "\033[2J\033[H"
 HIDE_CUR = "\033[?25l"
@@ -136,7 +134,7 @@ def detect_best_installed_model(ollama_url: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="AI Motion Agent for Device Bridge")
+    p = argparse.ArgumentParser(description="SensIO AI Motion Agent")
     default_bridge = (
         os.environ.get("BRIDGE")
         or load_bridge_from_files()
@@ -160,16 +158,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--interval", type=float, default=0.05, help="Sensor poll interval in seconds"
     )
-    p.add_argument(
-        "--action-cmd", default="", help="Optional shell command to execute on gesture"
-    )
     return p.parse_args()
 
 
 def extract_sensors(
     data: Dict[str, Any]
 ) -> Tuple[Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
-    """Extracts linear_acceleration, gyroscope, and accelerometer from any response map."""
     lin = gyro = acc = None
     for key, reading in data.items():
         if not isinstance(reading, dict):
@@ -187,8 +181,49 @@ def extract_sensors(
     return lin, gyro, acc
 
 
+class TouchState:
+    """Tracks touchscreen coordinates, normalized positions, and active region."""
+
+    def __init__(self) -> None:
+        self.action = "UP"
+        self.x = 0.0
+        self.y = 0.0
+        self.x_norm = 0.5
+        self.y_norm = 0.5
+        self.screen_w = 1080
+        self.screen_h = 2316
+        self.last_touch_time = 0.0
+        self.touch_trail: Deque[Tuple[float, float, float]] = deque(maxlen=8)
+
+    def update(self, touch_data: Optional[Dict[str, Any]]) -> None:
+        if not touch_data or not isinstance(touch_data, dict):
+            return
+        self.action = touch_data.get("action", "UP")
+        self.screen_w = touch_data.get("screen_width", 1080)
+        self.screen_h = touch_data.get("screen_height", 2316)
+
+        pointers = touch_data.get("pointers", [])
+        if pointers and isinstance(pointers, list):
+            p0 = pointers[0]
+            if isinstance(p0, dict):
+                self.x = p0.get("x", 0.0)
+                self.y = p0.get("y", 0.0)
+                self.x_norm = p0.get("x_norm", 0.5)
+                self.y_norm = p0.get("y_norm", 0.5)
+                now = time.time()
+                self.last_touch_time = now
+                self.touch_trail.append((self.x_norm, self.y_norm, now))
+
+    def get_region_label(self) -> str:
+        if (time.time() - self.last_touch_time) > 1.5:
+            return "No Active Touch"
+        horiz = "Left" if self.x_norm < 0.35 else ("Right" if self.x_norm > 0.65 else "Center")
+        vert = "Top" if self.y_norm < 0.35 else ("Bottom" if self.y_norm > 0.65 else "Middle")
+        return f"{vert}-{horiz} ({self.action})"
+
+
 class MotionDSP:
-    """Calculates physical orientation, acceleration vectors, and micro-gestures."""
+    """Calculates orientation, acceleration, and micro-gestures."""
 
     def __init__(self) -> None:
         self.pitch = 0.0
@@ -197,8 +232,6 @@ class MotionDSP:
         self.gyro_mag = 0.0
         self.jerk = 0.0
         self.last_acc: Optional[List[float]] = None
-        self.acc_history: Deque[float] = deque(maxlen=30)
-        self.gyro_history: Deque[float] = deque(maxlen=30)
         self.recent_gestures: Deque[Tuple[str, float]] = deque(maxlen=10)
         self.last_shake_time = 0.0
         self.stationary_since = time.time()
@@ -214,8 +247,6 @@ class MotionDSP:
         if acc and len(acc) >= 3:
             ax, ay, az = acc[0], acc[1], acc[2]
             self.g_mag = math.sqrt(ax * ax + ay * ay + az * az)
-
-            # Pitch & Roll in degrees
             self.pitch = math.atan2(ay, math.sqrt(ax * ax + az * az)) * 180.0 / math.pi
             self.roll = math.atan2(-ax, az) * 180.0 / math.pi
 
@@ -228,7 +259,6 @@ class MotionDSP:
             gx, gy, gz = gyro[0], gyro[1], gyro[2]
             self.gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
 
-        # Jerk
         if self.last_acc and acc and len(acc) >= 3:
             self.jerk = math.sqrt(
                 (acc[0] - self.last_acc[0]) ** 2
@@ -239,12 +269,8 @@ class MotionDSP:
             self.last_acc = list(acc)
 
         lin_mag = math.sqrt(lx * lx + ly * ly + lz * lz)
-        self.acc_history.append(lin_mag)
-        self.gyro_history.append(self.gyro_mag)
 
-        # Gestures
         detected_gesture = None
-
         if self.g_mag < 2.5:
             detected_gesture = "FREEFALL_DROP"
         elif self.jerk > 16.0 or lin_mag > 18.0:
@@ -255,16 +281,10 @@ class MotionDSP:
             detected_gesture = "WRIST_FLICK"
         elif az < -7.0 and abs(ax) < 4.0:
             detected_gesture = "FLIP_FACE_DOWN"
-        elif (
-            self.pitch > 25.0
-            and lin_mag > 1.2
-            and (now - self.stationary_since) > 1.5
-        ):
+        elif self.pitch > 25.0 and lin_mag > 1.2 and (now - self.stationary_since) > 1.5:
             detected_gesture = "PICKUP_PHONE"
 
-        if lin_mag < 0.3 and self.gyro_mag < 0.2:
-            pass
-        else:
+        if lin_mag >= 0.3 or self.gyro_mag >= 0.2:
             self.stationary_since = now
 
         if detected_gesture:
@@ -275,7 +295,6 @@ class MotionDSP:
             ):
                 self.recent_gestures.append((detected_gesture, now))
 
-        # Qualitative State
         if (now - self.stationary_since) > 2.0:
             state_desc = "Stationary on flat surface"
         elif az < -7.0:
@@ -296,14 +315,46 @@ class MotionDSP:
         }
 
 
-def bar_chart(val: float, max_val: float, width: int = 15) -> str:
+def bar_chart(val: float, max_val: float, width: int = 12) -> str:
     norm = min(1.0, max(0.0, val / max_val))
     filled = int(norm * width)
     return "█" * filled + "░" * (width - filled)
 
 
+def render_screen_pad(touch: TouchState, width: int = 22, height: int = 8) -> List[str]:
+    """Draws an ASCII smartphone display pad showing real-time touch coordinates."""
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    now = time.time()
+
+    # Draw touch history trail
+    for x_n, y_n, ts in touch.touch_trail:
+        col = int(x_n * (width - 1))
+        row = int(y_n * (height - 1))
+        if 0 <= col < width and 0 <= row < height:
+            age = now - ts
+            grid[row][col] = "•" if age < 0.8 else "·"
+
+    # Draw active touch pointer
+    if (now - touch.last_touch_time) <= 1.5:
+        col = int(touch.x_norm * (width - 1))
+        row = int(touch.y_norm * (height - 1))
+        col = max(0, min(width - 1, col))
+        row = max(0, min(height - 1, row))
+        grid[row][col] = "🔴" if touch.action in ("DOWN", "MOVE") else "⦿"
+
+    border_top = "┌─ Phone Screen ─┐".center(width + 2, "─")
+    border_bottom = "└" + "─" * width + "┘"
+
+    lines = [f"{C_GRAY}{border_top}{RESET}"]
+    for r in range(height):
+        row_str = "".join(grid[r])
+        lines.append(f"{C_GRAY}│{RESET}{row_str}{C_GRAY}│{RESET}")
+    lines.append(f"{C_GRAY}{border_bottom}{RESET}")
+    return lines
+
+
 class AIBrainThread:
-    """Async worker thread querying local Ollama LLM for motion context & intent reasoning."""
+    """Async worker thread querying local Ollama LLM for motion & touch intent reasoning."""
 
     def __init__(self, ollama_url: str, model_name: str) -> None:
         self.ollama_url = ollama_url.rstrip("/")
@@ -346,12 +397,11 @@ class AIBrainThread:
 
         prompt = (
             f"Smartphone Sensor Reading:\n"
-            f"- Pitch: {data['pitch']:.1f}°, Roll: {data['roll']:.1f}°\n"
-            f"- Force: {data['g_mag']:.2f} m/s², Gyro Rotation: {data['gyro_mag']:.2f} rad/s\n"
-            f"- State: {data['state_desc']}\n"
-            f"- Gestures: {', '.join(data['recent_gestures']) or 'None'}\n\n"
-            f"State what the user is physically doing and their spatial intent in 1 plain sentence. "
-            f"End with one action token in brackets e.g. [ACTION: MUTE] or [ACTION: READ] or [ACTION: FOCUS]."
+            f"- Motion State: {data['state_desc']} (Pitch: {data['pitch']:.1f}°, Roll: {data['roll']:.1f}°)\n"
+            f"- G-Force: {data['g_mag']:.2f} m/s², Gyro: {data['gyro_mag']:.2f} rad/s\n"
+            f"- Touchpad Region: {data['touch_region']}\n"
+            f"- Micro-Gestures: {', '.join(data['recent_gestures']) or 'None'}\n\n"
+            f"Describe user action and intent in 1 sentence. End with 1 action token e.g. [ACTION: TAP_SELECT] or [ACTION: READ] or [ACTION: MUTE]."
         )
 
         url = f"{self.ollama_url}/api/generate"
@@ -365,8 +415,6 @@ class AIBrainThread:
         try:
             res = http_post_json(url, req_data, timeout=30.0)
             text = res.get("response", "").strip()
-
-            # Remove <think>...</think> tags if thinking model
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
             if text:
@@ -385,36 +433,45 @@ class AIBrainThread:
 def render_dashboard(
     bridge_url: str,
     metrics: Dict[str, Any],
+    touch: TouchState,
     ai_thread: AIBrainThread,
     model_name: str,
 ) -> str:
     lines = [CLEAR + HIDE_CUR]
-    lines.append(
-        f"  {BOLD}{C_CYAN}🤖 AI Motion Intelligence & Spatial Reasoning Agent{RESET}"
-    )
+    lines.append(f"  {BOLD}{C_CYAN}🤖 SensIO: Multi-Modal AI Motion & Touch Agent{RESET}")
     lines.append(f"  {DIM}Bridge: {bridge_url}  │  LLM: {model_name} (Ollama){RESET}")
     lines.append("  " + "─" * 65)
 
-    p_bar = bar_chart(abs(metrics["pitch"]), 90.0, 12)
-    r_bar = bar_chart(abs(metrics["roll"]), 180.0, 12)
-    g_bar = bar_chart(metrics["g_mag"], 20.0, 12)
-    w_bar = bar_chart(metrics["gyro_mag"], 5.0, 12)
+    p_bar = bar_chart(abs(metrics["pitch"]), 90.0, 10)
+    r_bar = bar_chart(abs(metrics["roll"]), 180.0, 10)
+    g_bar = bar_chart(metrics["g_mag"], 20.0, 10)
 
+    # ASCII Screen Pad
+    screen_pad = render_screen_pad(touch, width=22, height=6)
+
+    # Layout Row: Sensors on Left, ASCII Touch Screen on Right
     lines.append(
-        f"  {C_AMBER}Pitch:{RESET} {metrics['pitch']:+6.1f}° [{p_bar}]   "
-        f"{C_AMBER}Roll:{RESET} {metrics['roll']:+6.1f}° [{r_bar}]"
+        f"  {C_AMBER}Pitch:{RESET} {metrics['pitch']:+5.1f}° [{p_bar}]   {screen_pad[0]}"
     )
     lines.append(
-        f"  {C_GREEN}G-Force:{RESET} {metrics['g_mag']:5.2f}m/s² [{g_bar}]   "
-        f"{C_GREEN}Gyro:{RESET}  {metrics['gyro_mag']:5.2f}rad/s [{w_bar}]"
+        f"  {C_AMBER}Roll: {RESET} {metrics['roll']:+5.1f}° [{r_bar}]   {screen_pad[1]}"
     )
     lines.append(
-        f"  {C_PURPLE}Physical State:{RESET} {BOLD}{metrics['state_desc']}{RESET}"
+        f"  {C_GREEN}Force:{RESET} {metrics['g_mag']:5.2f}m/s² [{g_bar}]   {screen_pad[2]}"
+    )
+    lines.append(
+        f"  {C_PURPLE}State:{RESET} {BOLD}{metrics['state_desc'][:22]:<22}{RESET} {screen_pad[3]}"
     )
 
-    gestures_str = "  ".join(
-        [f"⚡ {g}" for g in metrics["recent_gestures"][-4:]]
-    ) or "None (resting)"
+    t_str = f"x:{touch.x:.0f} y:{touch.y:.0f} ({touch.x_norm:.2f}, {touch.y_norm:.2f})"
+    lines.append(
+        f"  {C_ROSE}Touch:{RESET} {BOLD}{touch.get_region_label()[:22]:<22}{RESET} {screen_pad[4]}"
+    )
+    lines.append(
+        f"  {C_GRAY}{t_str:<32}{RESET} {screen_pad[5]}"
+    )
+
+    gestures_str = "  ".join([f"⚡ {g}" for g in metrics["recent_gestures"][-3:]]) or "None"
     lines.append(f"  {C_MAGENTA}Micro-Gestures:{RESET} {gestures_str}")
     lines.append("  " + "─" * 65)
 
@@ -422,13 +479,9 @@ def render_dashboard(
         analysis = ai_thread.latest_analysis
         intent = ai_thread.active_intent
 
-    lines.append(
-        f"  {BOLD}{C_CYAN}🧠 Local LLM Spatial Intent Reasoning:{RESET}"
-    )
+    lines.append(f"  {BOLD}{C_CYAN}🧠 Local LLM Multi-Modal Intent Reasoning:{RESET}")
     lines.append(f"  {C_GRAY}{analysis}{RESET}")
-    lines.append(
-        f"  {C_GREEN}Intent Action Trigger:{RESET} {BOLD}[{intent}]{RESET}"
-    )
+    lines.append(f"  {C_GREEN}Intent Action Trigger:{RESET} {BOLD}[{intent}]{RESET}")
     lines.append("  " + "─" * 65)
     lines.append(f"  {DIM}Press Ctrl+C to exit agent.{RESET}")
 
@@ -442,45 +495,45 @@ def main() -> int:
 
     model_name = args.model or detect_best_installed_model(args.ollama_url)
 
-    print(
-        f"{DIM}Connecting to Device Bridge at {bridge_url}...{RESET}",
-        file=sys.stderr,
-    )
-    print(
-        f"{DIM}Using Ollama model: {model_name}{RESET}",
-        file=sys.stderr,
-    )
+    print(f"{DIM}Connecting to SensIO Bridge at {bridge_url}...{RESET}", file=sys.stderr)
+    print(f"{DIM}Using Ollama model: {model_name}{RESET}", file=sys.stderr)
 
     dsp = MotionDSP()
+    touch = TouchState()
     ai_thread = AIBrainThread(args.ollama_url, model_name)
     ai_thread.start()
 
     try:
         while True:
             try:
-                data = http_get_json(
-                    f"{bridge_url}/v1/sensors", token, timeout=3.0
-                )
-                if isinstance(data, dict):
-                    lin, gyro, acc = extract_sensors(data)
-
+                # Fetch sensor data
+                s_data = http_get_json(f"{bridge_url}/v1/sensors", token, timeout=3.0)
+                if isinstance(s_data, dict):
+                    lin, gyro, acc = extract_sensors(s_data)
                     metrics = dsp.update(lin, gyro, acc)
-                    ai_thread.submit_data(metrics)
 
-                    out = render_dashboard(bridge_url, metrics, ai_thread, model_name)
-                    sys.stdout.write(out)
-                    sys.stdout.flush()
+                # Fetch touch data
+                t_data = http_get_json(f"{bridge_url}/v1/touch", token, timeout=1.5)
+                if isinstance(t_data, dict):
+                    touch.update(t_data)
+
+                metrics["touch_region"] = touch.get_region_label()
+                ai_thread.submit_data(metrics)
+
+                out = render_dashboard(bridge_url, metrics, touch, ai_thread, model_name)
+                sys.stdout.write(out)
+                sys.stdout.flush()
 
                 time.sleep(args.interval)
             except (urllib.error.URLError, TimeoutError, OSError) as ex:
                 sys.stdout.write(
-                    f"{CLEAR}  Waiting for Device Bridge at {bridge_url} ({type(ex).__name__})...\n"
+                    f"{CLEAR}  Waiting for SensIO Bridge at {bridge_url} ({type(ex).__name__})...\n"
                 )
                 sys.stdout.flush()
                 time.sleep(1.0)
     except KeyboardInterrupt:
         ai_thread.running = False
-        sys.stdout.write(SHOW_CUR + "\n  AI Motion Agent stopped.\n")
+        sys.stdout.write(SHOW_CUR + "\n  SensIO AI Agent stopped.\n")
         sys.stdout.flush()
     return 0
 
