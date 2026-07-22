@@ -13,16 +13,16 @@ MODEL_NAME=$($ADB_CMD shell getprop ro.product.model || echo "Android Emulator")
 echo "Target device model: $MODEL_NAME"
 
 # Start background recording
-$ADB_CMD shell screenrecord --size 720x1600 --bit-rate 4000000 --time-limit 180 $REMOTE_TMP &
+$ADB_CMD shell screenrecord --size 720x1600 --bit-rate 4000000 --time-limit 120 $REMOTE_TMP &
 REC_PID=$!
 
 echo "Recording started..."
 sleep 2
 
-# 1. Launch SensIO App & Stay on Home Screen
+# 1. Launch SensIO App
 echo "[1/4] Launching SensIO App..."
 $ADB_CMD shell am start -n dev.asik.devicebridge/.MainActivity
-sleep 4
+sleep 3
 
 # 2. Go to Settings Tab
 echo "[2/4] Navigating to Settings Tab..."
@@ -39,9 +39,6 @@ echo "Tapping Enable Global Touch Tracking button..."
 $ADB_CMD shell input tap 670 826
 sleep 4
 
-# Slowly scroll disclosure text inside dialog if needed
-sleep 2
-
 # Tap "Decline" button -> Demonstrating Decline Flow
 echo "Tapping Decline button..."
 $ADB_CMD shell input tap 475 2123
@@ -52,13 +49,30 @@ echo "Re-triggering Prominent Disclosure..."
 $ADB_CMD shell input tap 670 826
 sleep 4
 
-# Tap "Agree & Enable" button -> Demonstrating Agree Flow
+# Tap "Agree & Enable" button -> Opens System Accessibility Settings
 echo "Tapping Agree & Enable button..."
 $ADB_CMD shell input tap 860 2123
-sleep 4
+sleep 3
 
-# In System Accessibility Settings, press Back to return to SensIO
+# In System Accessibility Settings, tap "SensIO" under Downloaded Apps
+echo "Tapping SensIO in System Accessibility Settings..."
+$ADB_CMD shell input tap 400 930
+sleep 3
+
+# Tap "Use SensIO" toggle
+echo "Tapping Use SensIO toggle..."
+$ADB_CMD shell input tap 500 848
+sleep 3
+
+# Tap "Allow" on System Permission Dialog
+echo "Tapping Allow on System Permission Dialog..."
+$ADB_CMD shell input tap 600 1940
+sleep 3
+
+# Return back to SensIO app
 echo "Returning to SensIO app..."
+$ADB_CMD shell input keyevent 4
+sleep 1
 $ADB_CMD shell input keyevent 4
 sleep 3
 
@@ -80,10 +94,23 @@ sleep 5
 $ADB_CMD shell cmd statusbar collapse
 sleep 3
 
-# 4. Demonstrate Core Feature (Background Service Execution)
+# 4. Demonstrate Core Feature (Background API execution)
 echo "[4/4] Demonstrating background API execution..."
 # Press Home button to background the app
 $ADB_CMD shell input keyevent 3
+sleep 3
+
+# Perform swipes/taps on Home Screen to demonstrate background touch tracking
+echo "Performing background touches on Home Screen..."
+$ADB_CMD shell input tap 400 1900
+sleep 2
+$ADB_CMD shell input swipe 900 1500 200 1500 300
+sleep 2
+$ADB_CMD shell input swipe 200 1500 900 1500 300
+sleep 3
+
+# Re-open SensIO to show active status
+$ADB_CMD shell am start -n dev.asik.devicebridge/.MainActivity
 sleep 4
 
 # Stop screen recording
