@@ -17,3 +17,9 @@ bin/
 gen/
 out/
 .kotlin/
+
+# Signing keys & properties
+*.jks
+*.keystore
+keystore.properties
+
