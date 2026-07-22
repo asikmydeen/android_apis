@@ -66,6 +66,7 @@ fun SettingsScreen() {
     var authLocal by remember {
         mutableStateOf(BridgePrefs.authEnabled(context) && BridgePrefs.networkMode(context) == NetworkMode.LOCAL)
     }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     var logPreview by remember { mutableStateOf("") }
 
     val capabilities = remember { CapabilityScanner(context).scan() }
@@ -198,14 +199,7 @@ fun SettingsScreen() {
                     BridgePrefs.setStreamTouch(context, it)
                 }
                 Button(
-                    onClick = {
-                        try {
-                            val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                            context.startActivity(intent)
-                        } catch (_: Exception) {
-                            Toast.makeText(context, "Could not open Accessibility Settings", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onClick = { showAccessibilityDisclosure = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Enable Global Touch Tracking (Accessibility)")
@@ -289,6 +283,68 @@ fun SettingsScreen() {
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+        }
+
+        if (showAccessibilityDisclosure) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showAccessibilityDisclosure = false },
+                title = {
+                    Text(
+                        "Accessibility Service Disclosure",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "SensIO requires the AccessibilityService API to capture touchscreen tap locations (X, Y coordinates) across applications when you enable Global Touch Tracking.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            "Purpose & Usage:",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            "Screen tap locations are processed locally and streamed exclusively to your local SensIO API server (and local AI agent scripts) on your private network for gesture automation and spatial reasoning.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            "Privacy Guarantee:",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            "SensIO does NOT collect, store, transmit, or share any personal or screen data with external cloud servers or third parties. All data remains 100% local to your device and private network.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showAccessibilityDisclosure = false
+                            try {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                context.startActivity(intent)
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "Could not open Accessibility Settings", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("Agree & Enable")
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = { showAccessibilityDisclosure = false }
+                    ) {
+                        Text("Decline")
+                    }
+                }
+            )
         }
     }
 }
