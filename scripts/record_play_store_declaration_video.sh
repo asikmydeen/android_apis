@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Records Play Store Declaration Review Video via ADB (supports Android Emulator & Physical Devices)
+# Records Play Store Declaration Review Video via ADB with exact UI coordinates
 set -euo pipefail
 
 SERIAL="${ADB_SERIAL:-emulator-5554}"
@@ -16,67 +16,75 @@ echo "Target device model: $MODEL_NAME"
 $ADB_CMD shell screenrecord --size 720x1600 --bit-rate 4000000 --time-limit 180 $REMOTE_TMP &
 REC_PID=$!
 
-echo "Recording started. Executing automated demonstration sequence..."
+echo "Recording started..."
 sleep 2
 
-# 1. Launch SensIO App
+# 1. Launch SensIO App & Stay on Home Screen
 echo "[1/4] Launching SensIO App..."
 $ADB_CMD shell am start -n dev.asik.devicebridge/.MainActivity
-sleep 3
-
-# 2. Trigger Accessibility Disclosure Dialog in Settings
-echo "[2/4] Demonstrating Accessibility Disclosure & Consent Flow..."
-# Tap Settings tab (Coordinates tailored for emulator resolution)
-$ADB_CMD shell input tap 1000 2800
-sleep 2
-
-# Scroll down to reveal Touchscreen section & Accessibility button
-$ADB_CMD shell input swipe 500 2000 500 1000 300
-sleep 2
-
-# Tap "Enable Global Touch Tracking" button to trigger Prominent Disclosure Dialog
-$ADB_CMD shell input tap 670 1450
 sleep 4
 
-# Tap "Decline" button (Demonstrating Decline Flow)
-$ADB_CMD shell input tap 400 1750
+# 2. Go to Settings Tab
+echo "[2/4] Navigating to Settings Tab..."
+$ADB_CMD shell input tap 1185 2800
+sleep 3
+
+# Scroll down to reveal "Enable Global Touch Tracking (Accessibility)" button
+echo "Scrolling down Settings..."
+$ADB_CMD shell input swipe 600 2200 600 800 400
+sleep 3
+
+# Tap "Enable Global Touch Tracking (Accessibility)" button -> Shows Prominent Disclosure
+echo "Tapping Enable Global Touch Tracking button..."
+$ADB_CMD shell input tap 670 826
+sleep 4
+
+# Slowly scroll disclosure text inside dialog if needed
 sleep 2
+
+# Tap "Decline" button -> Demonstrating Decline Flow
+echo "Tapping Decline button..."
+$ADB_CMD shell input tap 475 2123
+sleep 3
 
 # Re-trigger Prominent Disclosure Dialog
-$ADB_CMD shell input tap 670 1450
-sleep 3
+echo "Re-triggering Prominent Disclosure..."
+$ADB_CMD shell input tap 670 826
+sleep 4
 
-# Tap "Agree & Enable" button (Demonstrating Consent Flow)
-$ADB_CMD shell input tap 900 1750
-sleep 3
+# Tap "Agree & Enable" button -> Demonstrating Agree Flow
+echo "Tapping Agree & Enable button..."
+$ADB_CMD shell input tap 860 2123
+sleep 4
 
-# Return back to SensIO
+# In System Accessibility Settings, press Back to return to SensIO
+echo "Returning to SensIO app..."
 $ADB_CMD shell input keyevent 4
-sleep 2
+sleep 3
 
-# 3. Demonstrate Foreground Service & Ongoing Notification
-echo "[3/4] Demonstrating Foreground Service & Ongoing Notification..."
-# Tap Home tab
+# 3. Go to Home Tab & Start Service
+echo "[3/4] Starting SensIO Foreground Service..."
 $ADB_CMD shell input tap 150 2800
-sleep 2
+sleep 3
 
 # Tap "Start SensIO Service" button
-$ADB_CMD shell input tap 670 850
+$ADB_CMD shell input tap 670 820
 sleep 3
 
-# Pull down notification shade to demonstrate ongoing foreground notification
+# Expand status bar / notification shade to demonstrate active ongoing notification
+echo "Expanding status bar notification shade..."
 $ADB_CMD shell cmd statusbar expand-notifications
-sleep 4
+sleep 5
 
 # Collapse notification shade
 $ADB_CMD shell cmd statusbar collapse
-sleep 2
-
-# 4. Demonstrate Core Feature (Background API & Location/Camera/Special Use FGS)
-echo "[4/4] Demonstrating Core Feature background access..."
-# Background the app to show background service execution
-$ADB_CMD shell input keyevent 3
 sleep 3
+
+# 4. Demonstrate Core Feature (Background Service Execution)
+echo "[4/4] Demonstrating background API execution..."
+# Press Home button to background the app
+$ADB_CMD shell input keyevent 3
+sleep 4
 
 # Stop screen recording
 echo "Stopping recording..."
