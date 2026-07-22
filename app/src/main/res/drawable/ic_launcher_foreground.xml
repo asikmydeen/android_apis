@@ -4,10 +4,32 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Outer Pulse Radar Rings -->
     <path
-        android:fillColor="#1B6EF3"
-        android:pathData="M54,20c-18.8,0 -34,15.2 -34,34s15.2,34 34,34 34,-15.2 34,-34 -15.2,-34 -34,-34zM54,30c13.3,0 24,10.7 24,24s-10.7,24 -24,24 -24,-10.7 -24,-24 10.7,-24 24,-24z" />
+        android:fillColor="#38BDF8"
+        android:fillAlpha="0.2"
+        android:pathData="M54,20A34,34 0,1,0 54,88A34,34 0,1,0 54,20Z" />
+
     <path
-        android:fillColor="#1B6EF3"
-        android:pathData="M50,40h8v28h-8zM40,50h28v8h-28z" />
+        android:fillColor="#818CF8"
+        android:fillAlpha="0.35"
+        android:pathData="M54,28A26,26 0,1,0 54,80A26,26 0,1,0 54,28Z" />
+
+    <!-- Central Sensor Core -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,36A18,18 0,1,0 54,72A18,18 0,1,0 54,36Z" />
+
+    <!-- Active Core Dot -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M54,46A8,8 0,1,0 54,62A8,8 0,1,0 54,46Z" />
+
+    <!-- Signal Arc Lines -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M30,54 L18,54 M78,54 L90,54 M54,30 L54,18 M54,78 L54,90" />
 </vector>
