@@ -187,8 +187,11 @@ class BridgeServer(
                 }
 
                 if (!authEnabled) return@intercept
-                // Minimal landing page is public; the detailed one requires auth.
+                // Public, no-token surfaces: landing page, the API contract, and the
+                // Swagger docs UI. These expose endpoint SHAPES, not data or secrets —
+                // every actual API call Swagger makes still needs the token.
                 if (path == "/" || path.isEmpty()) return@intercept
+                if (path == "/docs" || path == "/v1/openapi.json") return@intercept
                 if (!authorized(call)) {
                     ErrorLog.warn("auth_denied", "401 ${call.request.httpMethod.value} $path")
                     call.respond(
@@ -239,6 +242,10 @@ class BridgeServer(
 
                 get("/v1/openapi.json") {
                     call.respondText(openApiJson(), ContentType.Application.Json)
+                }
+
+                get("/docs") {
+                    call.respondText(swaggerHtml(), ContentType.Text.Html)
                 }
 
                 get("/v1/diagnostics") {
@@ -1042,10 +1049,34 @@ class BridgeServer(
             })
             put("paths", buildJsonObject {
                 apiRoutes.forEach { r ->
+                    // Extract {name} path params from the route so Swagger renders inputs.
+                    val pathParams = Regex("\\{([^}]+)\\}").findAll(r.path).map { it.groupValues[1] }.toList()
+                    val queryParams = knownQueryParams(r.path)
                     put(r.path, buildJsonObject {
                         put(r.method, buildJsonObject {
                             put("summary", r.summary)
                             put("tags", buildJsonArray { add(JsonPrimitive(r.tag)) })
+                            if (pathParams.isNotEmpty() || queryParams.isNotEmpty()) {
+                                put("parameters", buildJsonArray {
+                                    pathParams.forEach { p ->
+                                        add(buildJsonObject {
+                                            put("name", p)
+                                            put("in", "path")
+                                            put("required", true)
+                                            put("schema", buildJsonObject { put("type", "string") })
+                                        })
+                                    }
+                                    queryParams.forEach { (name, desc) ->
+                                        add(buildJsonObject {
+                                            put("name", name)
+                                            put("in", "query")
+                                            put("required", false)
+                                            put("description", desc)
+                                            put("schema", buildJsonObject { put("type", "string") })
+                                        })
+                                    }
+                                })
+                            }
                             if (r.mutating || authEnabled) {
                                 put("security", buildJsonArray {
                                     add(buildJsonObject {
@@ -1055,6 +1086,9 @@ class BridgeServer(
                             }
                             put("responses", buildJsonObject {
                                 put("200", buildJsonObject { put("description", "OK") })
+                                if (r.mutating || authEnabled) {
+                                    put("401", buildJsonObject { put("description", "Missing or invalid token") })
+                                }
                             })
                         })
                     })
@@ -1065,6 +1099,83 @@ class BridgeServer(
             })
         }
         return json.encodeToString(JsonObject.serializer(), doc)
+    }
+
+    /** Documented query params per route, so the spec is buildable, not just listable. */
+    private fun knownQueryParams(path: String): List<Pair<String, String>> = when (path) {
+        "/v1/debug/log" -> listOf("n" to "Number of recent entries to return (default 50)")
+        else -> emptyList()
+    }
+
+    /**
+     * Swagger UI shell. Loads the viewer assets from the public CDN (keeps the APK
+     * lean) and points them at our own /v1/openapi.json. The viewing device needs
+     * internet for the CDN; the spec + API themselves work fully offline. The
+     * "Authorize" button lets a user paste the bearer token to try endpoints live.
+     */
+    private fun swaggerHtml(): String {
+        // Swagger UI renders only REST paths — it ignores WebSockets entirely. Build a
+        // custom section from wsRoutes so the streaming surface (incl. audio) is visible.
+        val wsRows = wsRoutes.joinToString("\n") { (path, desc) ->
+            """<tr><td><code>ws://&lt;host&gt;:$port$path</code></td><td>$desc</td></tr>"""
+        }
+        val authHint = if (authEnabled) {
+            "All streams require the token: append <code>?token=&lt;token&gt;</code> to the URL (WebSockets can't send an Authorization header from a browser)."
+        } else {
+            "Auth is off in this mode — no token needed."
+        }
+        // NOTE: use \$ for any literal dollar; ${'$'}{...} stays as JS at runtime.
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8"/>
+          <meta name="viewport" content="width=device-width, initial-scale=1"/>
+          <title>Device Bridge API</title>
+          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"/>
+          <style>
+            .ws { font-family: sans-serif; max-width: 1200px; margin: 24px auto; padding: 0 20px; color: #3b4151; }
+            .ws h2 { font-size: 22px; }
+            .ws table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+            .ws td { border: 1px solid #e3e3e3; padding: 8px 10px; font-size: 14px; vertical-align: top; }
+            .ws code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; }
+            .ws pre { background: #1b1b2f; color: #e6e6f0; padding: 14px; border-radius: 6px; overflow-x: auto; }
+          </style>
+        </head>
+        <body>
+          <div id="swagger-ui"></div>
+          <div class="ws">
+            <h2>Streaming API (WebSocket)</h2>
+            <p>Live push streams. Not shown above — Swagger UI only renders REST. $authHint</p>
+            <table>
+              <tr><td><b>Endpoint</b></td><td><b>Streams</b></td></tr>
+              $wsRows
+            </table>
+            <p>Each message is a JSON envelope: <code>{ "topic": "...", "ts": "ISO-8601", "data": { ... } }</code>.
+               On <code>/v1/stream</code> you can also send <code>{"op":"subscribe","topics":["audio"]}</code> /
+               <code>{"op":"unsubscribe",...}</code> / <code>{"op":"ping"}</code>.</p>
+            <p><b>Audio note:</b> the <code>audio</code> topic streams loudness (<code>rms_db</code>, <code>peak_db</code>) about 7×/sec — NOT raw PCM samples.</p>
+            <pre># wscat example (all topics)
+wscat -c "ws://&lt;host&gt;:$port/v1/stream?token=&lt;token&gt;"
+
+# JavaScript (audio levels only)
+const ws = new WebSocket("ws://&lt;host&gt;:$port/v1/stream?topics=audio&amp;token=&lt;token&gt;");
+ws.onmessage = (e) => console.log(JSON.parse(e.data));</pre>
+          </div>
+          <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+          <script>
+            window.onload = function () {
+              window.ui = SwaggerUIBundle({
+                url: "/v1/openapi.json",
+                dom_id: "#swagger-ui",
+                deepLinking: true,
+                presets: [SwaggerUIBundle.presets.apis],
+              });
+            };
+          </script>
+        </body>
+        </html>
+        """.trimIndent()
     }
 
     private fun authorized(call: ApplicationCall): Boolean {

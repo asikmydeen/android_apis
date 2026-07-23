@@ -79,6 +79,7 @@ fun RemoteScreen() {
     var testState by remember { mutableStateOf(TestState.IDLE) }
     var testDetail by remember { mutableStateOf("") }
     var showQr by remember { mutableStateOf(false) }
+    var showAdvancedMode by remember { mutableStateOf(false) }
 
     // The address a client should actually use, given the current mode.
     fun bestBaseUrl(): String = when (mode) {
@@ -108,7 +109,9 @@ fun RemoteScreen() {
         }
     }
 
-    val modes = listOf(NetworkMode.LOCAL, NetworkMode.LAN, NetworkMode.TAILSCALE, NetworkMode.CLOUDFLARE)
+    // Cloudflare is an advanced/niche path (manual Termux). Keep the primary chips
+    // to the common modes and reveal Cloudflare only on demand (or if it's active).
+    val primaryModes = listOf(NetworkMode.LOCAL, NetworkMode.LAN, NetworkMode.TAILSCALE)
 
     Column(
         modifier = Modifier
@@ -126,30 +129,37 @@ fun RemoteScreen() {
         // ---- Network mode selector -----------------------------------
         GlassCard(strong = true) {
             SectionLabel("Network mode")
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                modes.chunked(2).forEach { rowModes ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        rowModes.forEach { m ->
-                            ModeChip(
-                                label = when (m) {
-                                    NetworkMode.LOCAL -> "Local"
-                                    NetworkMode.LAN -> "LAN"
-                                    NetworkMode.TAILSCALE -> "Tailscale"
-                                    NetworkMode.CLOUDFLARE -> "Cloudflare"
-                                },
-                                selected = mode == m,
-                                modifier = Modifier.weight(1f),
-                                onClick = { applyMode(m) },
-                            )
-                        }
-                    }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                primaryModes.forEach { m ->
+                    ModeChip(
+                        label = when (m) {
+                            NetworkMode.LOCAL -> "Local"
+                            NetworkMode.LAN -> "LAN"
+                            NetworkMode.TAILSCALE -> "Tailscale"
+                            else -> m.name
+                        },
+                        selected = mode == m,
+                        modifier = Modifier.weight(1f),
+                        onClick = { applyMode(m) },
+                    )
                 }
+            }
+            // Cloudflare chip appears only when advanced is expanded or already active.
+            if (showAdvancedMode || mode == NetworkMode.CLOUDFLARE) {
+                ModeChip(
+                    label = "Cloudflare · advanced",
+                    selected = mode == NetworkMode.CLOUDFLARE,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { applyMode(NetworkMode.CLOUDFLARE) },
+                )
+            } else {
+                ActionButton("Show advanced modes", fullWidth = true) { showAdvancedMode = true }
             }
             GlassText(
                 when (mode) {
                     NetworkMode.LOCAL -> "Binds 127.0.0.1 — on-device only (Termux/Ubuntu). Safest mode."
                     NetworkMode.LAN -> "Binds 0.0.0.0 — reachable on local Wi-Fi. Bearer token required."
-                    NetworkMode.TAILSCALE -> "Binds 0.0.0.0 — reachable via Tailscale IP across your tailnet. Bearer token required."
+                    NetworkMode.TAILSCALE -> "Binds only the Tailscale IP — reachable across your tailnet, WireGuard-encrypted. Bearer token required."
                     NetworkMode.CLOUDFLARE -> "Binds 127.0.0.1 — forward with cloudflared for public HTTPS. Bearer token required."
                 },
                 secondary = true,
@@ -248,6 +258,30 @@ fun RemoteScreen() {
                     secondary = true,
                     size = 12.sp,
                 )
+            }
+        }
+
+        // ---- API docs (discoverability) ------------------------------
+        GlassCard {
+            SectionLabel("API for developers")
+            GlassText(
+                "Interactive Swagger docs describe every endpoint so clients and AI agents can be built against the bridge. Open it in a browser, or point tools at the OpenAPI spec.",
+                secondary = true,
+                size = 12.sp,
+            )
+            ActionButton("View API docs", primary = true, fullWidth = true) {
+                val base = bestBaseUrl().trimEnd('/')
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$base/docs")))
+                }.onFailure {
+                    copy(context, "$base/docs")
+                    Toast.makeText(context, "Docs URL copied: $base/docs", Toast.LENGTH_LONG).show()
+                }
+            }
+            ActionButton("Copy OpenAPI spec URL", fullWidth = true) {
+                val url = "${bestBaseUrl().trimEnd('/')}/v1/openapi.json"
+                copy(context, url)
+                Toast.makeText(context, "OpenAPI URL copied", Toast.LENGTH_SHORT).show()
             }
         }
 
