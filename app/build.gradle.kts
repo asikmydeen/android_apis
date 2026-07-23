@@ -97,6 +97,10 @@ dependencies {
     implementation("io.ktor:ktor-server-content-negotiation:$ktor")
     implementation("io.ktor:ktor-serialization-kotlinx-json:$ktor")
     implementation("io.ktor:ktor-server-status-pages:$ktor")
+    implementation("io.ktor:ktor-server-cors:$ktor")
+
+    // QR encoding for client pairing (pure-Java, no Android UI deps).
+    implementation("com.google.zxing:core:3.5.3")
 
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.accompanist:accompanist-permissions:0.36.0")

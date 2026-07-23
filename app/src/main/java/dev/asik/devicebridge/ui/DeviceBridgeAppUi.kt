@@ -1,31 +1,31 @@
 package dev.asik.devicebridge.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -35,110 +35,156 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.asik.devicebridge.BridgeRuntime
 import dev.asik.devicebridge.service.BridgeForegroundService
+import dev.asik.devicebridge.ui.components.LiveDot
+import dev.asik.devicebridge.ui.components.SignalField
+import dev.asik.devicebridge.ui.components.glass
+import dev.asik.devicebridge.ui.theme.rememberGlassTokens
 
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 
-private data class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+private data class Tab(val label: String, val icon: ImageVector)
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun DeviceBridgeAppUi() {
     val context = LocalContext.current
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val running by BridgeRuntime.running.collectAsState()
+    val g = rememberGlassTokens()
 
     val tabs = listOf(
-        Tab("Home", Icons.Default.Home),
+        Tab("Dashboard", Icons.Default.Dashboard),
         Tab("Remote", Icons.Default.Public),
-        Tab("Devices", Icons.Default.Devices),
         Tab("Settings", Icons.Default.Settings),
     )
 
-    Scaffold(
+    SignalField(
+        active = running,
         modifier = Modifier.pointerInteropFilter { motionEvent ->
             if (running) {
                 BridgeRuntime.touchCollector.onMotionEvent(motionEvent)
             }
             false
         },
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "SensIO",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (running) Color(0xFF10B981) else Color(0xFF9CA3AF)),
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            if (running) {
-                                BridgeForegroundService.stop(context)
-                            } else {
-                                BridgeForegroundService.start(context)
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PowerSettingsNew,
-                            contentDescription = if (running) "Stop Bridge" else "Start Bridge",
-                            tint = if (running) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
-        },
-        bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                tonalElevation = 6.dp,
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            // Transparent header floating over the field.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                tabs.forEachIndexed { index, t ->
-                    NavigationBarItem(
-                        selected = tab == index,
-                        onClick = { tab = index },
-                        icon = { Icon(t.icon, contentDescription = t.label) },
-                        label = { Text(t.label) },
+                Text(
+                    "SensIO",
+                    color = g.textPrimary,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.3).sp,
+                )
+                Spacer(Modifier.width(10.dp))
+                LiveDot(active = running, size = 9.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (running) "LIVE" else "IDLE",
+                    color = if (running) g.live else g.textFaint,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.4.sp,
+                )
+                Spacer(Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .glass(g, radius = 14.dp, strong = true)
+                        .selectable(selected = running, onClick = {
+                            if (running) BridgeForegroundService.stop(context)
+                            else BridgeForegroundService.start(context)
+                        }),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PowerSettingsNew,
+                        contentDescription = if (running) "Stop bridge" else "Start bridge",
+                        tint = if (running) g.live else g.textSecondary,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
-        },
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            AnimatedContent(
-                targetState = tab,
-                label = "tab_transition",
-            ) { targetTab ->
-                when (targetTab) {
-                    0 -> HomeScreen(onOpenRemote = { tab = 1 })
-                    1 -> RemoteScreen()
-                    2 -> DevicesScreen()
-                    else -> SettingsScreen()
+
+            // Screen content.
+            Box(Modifier.fillMaxSize().weight(1f)) {
+                AnimatedContent(
+                    targetState = tab,
+                    transitionSpec = {
+                        (fadeIn(tween(260))) togetherWith (fadeOut(tween(180)))
+                    },
+                    label = "tab_transition",
+                ) { targetTab ->
+                    when (targetTab) {
+                        0 -> DashboardScreen()
+                        1 -> RemoteScreen()
+                        else -> SettingsScreen()
+                    }
                 }
+            }
+
+            GlassBottomNav(tabs = tabs, selected = tab, onSelect = { tab = it })
+        }
+    }
+}
+
+@Composable
+private fun GlassBottomNav(
+    tabs: List<Tab>,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+) {
+    val g = rememberGlassTokens()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .glass(g, radius = 26.dp, strong = true)
+            .padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tabs.forEachIndexed { index, t ->
+            val isSel = selected == index
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .selectable(selected = isSel, onClick = { onSelect(index) })
+                    .then(
+                        if (isSel) Modifier.background(g.accentStart.copy(alpha = if (g.isDark) 0.18f else 0.14f))
+                        else Modifier,
+                    )
+                    .padding(vertical = 9.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(
+                    t.icon,
+                    contentDescription = t.label,
+                    tint = if (isSel) g.accentEnd else g.textFaint,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    t.label,
+                    color = if (isSel) g.textPrimary else g.textFaint,
+                    fontSize = 10.sp,
+                    fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
+                )
             }
         }
     }

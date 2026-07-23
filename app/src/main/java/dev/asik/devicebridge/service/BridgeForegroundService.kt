@@ -22,11 +22,12 @@ import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 
 class BridgeForegroundService : Service() {
 
@@ -34,6 +35,7 @@ class BridgeForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeLockRenewJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -92,7 +94,17 @@ class BridgeForegroundService : Service() {
                     "DeviceBridge::ServiceWakeLock",
                 )?.apply {
                     setReferenceCounted(false)
-                    acquire(10 * 60 * 60 * 1000L)
+                    acquire(WAKELOCK_GRANT_MS)
+                }
+                // A single acquire() expires at its timeout and is never renewed,
+                // so an always-on bridge silently loses the lock. Re-acquire on a
+                // timer safely under the grant window to keep it held indefinitely.
+                wakeLockRenewJob?.cancel()
+                wakeLockRenewJob = scope.launch {
+                    while (isActive) {
+                        delay(WAKELOCK_RENEW_MS)
+                        runCatching { wakeLock?.acquire(WAKELOCK_GRANT_MS) }
+                    }
                 }
             }
             if (wifiLock == null) {
@@ -110,6 +122,8 @@ class BridgeForegroundService : Service() {
     }
 
     private fun releaseLocks() {
+        wakeLockRenewJob?.cancel()
+        wakeLockRenewJob = null
         runCatching {
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
@@ -129,11 +143,17 @@ class BridgeForegroundService : Service() {
                 PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
             )
             val alarmService = applicationContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            alarmService?.set(
-                AlarmManager.RTC,
-                System.currentTimeMillis() + 1000,
-                restartPendingIntent,
-            )
+            // A plain RTC set() is heavily deferred (or dropped) by Doze / App-Standby
+            // on Samsung — the stated target device — so the bridge often never came
+            // back after swipe-away. setExactAndAllowWhileIdle + RTC_WAKEUP fires even
+            // in idle, restoring the always-reachable guarantee.
+            runCatching {
+                alarmService?.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    System.currentTimeMillis() + 1000,
+                    restartPendingIntent,
+                )
+            }
         }
     }
 
@@ -152,10 +172,12 @@ class BridgeForegroundService : Service() {
 
     override fun onDestroy() {
         releaseLocks()
-        runBlocking {
-            withTimeoutOrNull(STOP_TIMEOUT_MS) {
-                runCatching { BridgeRuntime.stopServer() }
-            }
+        // Never block the main thread here — onDestroy runs on the main thread and
+        // engine.stop() can take up to ~2s, an ANR during system-initiated teardown.
+        // The clean-stop path (ACTION_STOP) already stops the server asynchronously;
+        // this is best-effort cleanup on an independent scope for the killed case.
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { BridgeRuntime.stopServer() }
         }
         scope.cancel()
         super.onDestroy()
@@ -213,7 +235,10 @@ class BridgeForegroundService : Service() {
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "dev.asik.devicebridge.STOP"
 
-        private const val STOP_TIMEOUT_MS = 3000L
+        // Wake lock: request a bounded grant and renew comfortably before it lapses,
+        // so the lock is held for the whole session without an unbounded acquire.
+        private const val WAKELOCK_GRANT_MS = 60 * 60 * 1000L      // 1 hour
+        private const val WAKELOCK_RENEW_MS = 50 * 60 * 1000L      // renew every 50 min
 
         fun start(context: Context) {
             val intent = Intent(context, BridgeForegroundService::class.java)

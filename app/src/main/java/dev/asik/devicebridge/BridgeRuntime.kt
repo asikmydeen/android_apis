@@ -15,7 +15,9 @@ import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
 import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.ErrorLog
+import dev.asik.devicebridge.util.MdnsAdvertiser
 import dev.asik.devicebridge.util.NetworkAddresses
+import dev.asik.devicebridge.util.NetworkMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,6 +65,7 @@ object BridgeRuntime {
 
     private var server: BridgeServer? = null
     private val serverMutex = Mutex()
+    private var mdns: MdnsAdvertiser? = null
 
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
@@ -159,6 +162,12 @@ object BridgeRuntime {
                     "server_start",
                     "listening $bind:$p mode=${BridgePrefs.networkMode(ctx)} auth=$auth",
                 )
+                // Advertise on the LAN via mDNS when reachable there, so clients can
+                // discover the phone by service name instead of a DHCP IP.
+                val mode = BridgePrefs.networkMode(ctx)
+                if (mode == NetworkMode.LAN || mode == NetworkMode.TAILSCALE) {
+                    mdns = MdnsAdvertiser(ctx).also { it.register(p, VERSION, auth) }
+                }
             } catch (e: Exception) {
                 ErrorLog.error("server_start_failed", e.message ?: "start failed")
                 stopCollectors()
@@ -192,6 +201,8 @@ object BridgeRuntime {
 
     suspend fun stopServer() {
         serverMutex.withLock {
+            mdns?.unregister()
+            mdns = null
             server?.stop()
             server = null
             stopCollectors()

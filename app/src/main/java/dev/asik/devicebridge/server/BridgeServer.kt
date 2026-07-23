@@ -22,6 +22,7 @@ import dev.asik.devicebridge.util.NetworkAddresses
 import dev.asik.devicebridge.util.PermissionHelper
 import dev.asik.devicebridge.util.TimeUtil
 import io.ktor.http.ContentType
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.ApplicationCall
@@ -32,8 +33,10 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.header
+import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
@@ -51,16 +54,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
-import java.time.Duration
 import java.util.concurrent.atomic.AtomicReference
 
 class BridgeServer(
@@ -87,33 +92,105 @@ class BridgeServer(
     private val engineRef = AtomicReference<ApplicationEngine?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    fun start() {
+    suspend fun start() {
         val engine = embeddedServer(CIO, port = port, host = bindHost) {
             install(ContentNegotiation) {
                 json(json)
             }
-            install(WebSockets)
+            install(WebSockets) {
+                // Close half-open mobile sockets (Wi-Fi drop / network switch) so the
+                // per-session collector coroutine is reclaimed instead of leaking.
+                // Use the *Millis members (plain Long fields on WebSocketOptions) rather
+                // than the pingPeriod/timeout java.time.Duration extension properties,
+                // which would need extra imports and are Duration-flavor-sensitive.
+                pingPeriodMillis = 20_000
+                timeoutMillis = 15_000
+                // Cap inbound frames so a hostile client on a public tunnel can't OOM us.
+                maxFrameSize = 1L * 1024 * 1024
+            }
+            // Allow browser-origin clients (dashboards, Swagger try-it, agent web UIs).
+            // Bearer auth is the real gate, so anyHost is acceptable here.
+            install(CORS) {
+                anyHost()
+                allowHeaders { true }
+                allowMethod(HttpMethod.Get)
+                allowMethod(HttpMethod.Post)
+                allowMethod(HttpMethod.Options)
+                allowNonSimpleContentTypes = true
+            }
             install(StatusPages) {
                 exception<Throwable> { call, cause ->
+                    // Record the real cause internally; return a generic body so we
+                    // don't leak stack/internals to remote callers.
+                    ErrorLog.error(
+                        "http_500",
+                        "${call.request.path()} — ${cause::class.java.simpleName}: ${cause.message}",
+                    )
                     call.respond(
                         HttpStatusCode.InternalServerError,
                         ApiErrorBody(
                             ApiError(
                                 code = "internal_error",
-                                message = cause.message ?: cause::class.java.simpleName,
+                                message = "Internal server error",
                             ),
                         ),
                     )
                 }
             }
 
-            // Bearer auth when enabled (always for LAN / Tailscale / Cloudflare modes)
+            // Bearer auth when enabled (always for LAN / Tailscale / Cloudflare modes).
             intercept(ApplicationCallPipeline.Call) {
-                if (!authEnabled || authToken.isNullOrBlank()) return@intercept
                 val path = call.request.path()
-                // Allow unauthenticated human landing page only
+                val method = call.request.httpMethod
+
+                // CORS preflight must pass without checks so browsers can reach us.
+                if (method == HttpMethod.Options) return@intercept
+
+                // DNS-rebind defense: reject requests whose Host header isn't one of
+                // ours. A malicious page rebinding its domain to 127.0.0.1 still sends
+                // its own domain as Host, so an allowlist blocks it while every real
+                // client (loopback / our IPs / configured public host) passes.
+                if (!hostAllowed(call)) {
+                    ErrorLog.warn("host_denied", "403 host=${call.request.header("Host")} $path")
+                    call.respond(
+                        HttpStatusCode.Forbidden,
+                        ApiErrorBody(ApiError("forbidden", "Host not allowed")),
+                    )
+                    finish()
+                    return@intercept
+                }
+
+                // Fail closed: if auth is enabled but the token is blank/missing,
+                // refuse everything rather than silently serving the API open.
+                if (authEnabled && authToken.isNullOrBlank()) {
+                    ErrorLog.error("auth_misconfig", "authEnabled but token blank — refusing all requests")
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ApiErrorBody(ApiError("unauthorized", "Server auth misconfigured")),
+                    )
+                    finish()
+                    return@intercept
+                }
+
+                // Mutating endpoints actuate hardware (camera/USB) — always require a
+                // token, even in LOCAL mode where reads may be unauthenticated. This
+                // stops a DNS-rebind page from driving the device without the secret.
+                val isMutating = method == HttpMethod.Post || method == HttpMethod.Put || method == HttpMethod.Delete
+                if (isMutating && !authToken.isNullOrBlank() && !authorized(call)) {
+                    ErrorLog.warn("auth_denied", "401 ${method.value} $path (mutating requires token)")
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ApiErrorBody(ApiError("unauthorized", "This action requires a token")),
+                    )
+                    finish()
+                    return@intercept
+                }
+
+                if (!authEnabled) return@intercept
+                // Minimal landing page is public; the detailed one requires auth.
                 if (path == "/" || path.isEmpty()) return@intercept
                 if (!authorized(call)) {
+                    ErrorLog.warn("auth_denied", "401 ${call.request.httpMethod.value} $path")
                     call.respond(
                         HttpStatusCode.Unauthorized,
                         ApiErrorBody(
@@ -129,18 +206,16 @@ class BridgeServer(
 
             routing {
                 get("/") {
+                    // Public, unauthenticated: identify the service only. Network
+                    // topology (LAN/Tailscale IPs, public URL, bind host) is available
+                    // authenticated at /v1/config — never leak it to anonymous callers.
                     call.respondText(
                         buildString {
                             appendLine("Device Bridge $version")
-                            appendLine("mode=$networkMode bind=$bindHost port=$port auth=$authEnabled")
-                            appendLine("Local: http://127.0.0.1:$port")
-                            NetworkAddresses.lanIps().forEach { appendLine("LAN: http://$it:$port") }
-                            NetworkAddresses.tailscaleIps().forEach { appendLine("Tailscale: http://$it:$port") }
-                            val pub = publicUrlProvider()
-                            if (pub.isNotBlank()) appendLine("Public: $pub")
-                            appendLine()
-                            appendLine("GET /v1/health  /v1/diagnostics  /v1/snapshot  /v1/config")
-                            if (authEnabled) appendLine("Auth: Authorization: Bearer <token>")
+                            if (authEnabled) {
+                                appendLine("Auth required: Authorization: Bearer <token>  (or ?token=)")
+                            }
+                            appendLine("GET /v1/health   /v1/config   /v1/capabilities")
                         },
                         ContentType.Text.Plain,
                     )
@@ -160,6 +235,10 @@ class BridgeServer(
                             degraded = diag?.degraded ?: false,
                         ),
                     )
+                }
+
+                get("/v1/openapi.json") {
+                    call.respondText(openApiJson(), ContentType.Application.Json)
                 }
 
                 get("/v1/diagnostics") {
@@ -490,38 +569,44 @@ class BridgeServer(
                             },
                         ),
                     )
-                    hub.events.filter { it is HubEvent.UsbSerial && it.chunk.deviceId == id }.collect { event ->
-                        val chunk = (event as HubEvent.UsbSerial).chunk
-                        sendJson(
-                            StreamEnvelope(
-                                topic = "usb_serial",
-                                ts = TimeUtil.nowIso(),
-                                data = buildJsonObject {
-                                    put("device_id", chunk.deviceId)
-                                    put("bytes", chunk.bytes)
-                                    put("base64", chunk.base64)
-                                    chunk.text?.let { put("text", it) }
-                                },
-                            ),
-                        )
+                    val collector = launch {
+                        hub.events.filter { it is HubEvent.UsbSerial && it.chunk.deviceId == id }.collect { event ->
+                            val chunk = (event as HubEvent.UsbSerial).chunk
+                            sendJson(
+                                StreamEnvelope(
+                                    topic = "usb_serial",
+                                    ts = TimeUtil.nowIso(),
+                                    data = buildJsonObject {
+                                        put("device_id", chunk.deviceId)
+                                        put("bytes", chunk.bytes)
+                                        put("base64", chunk.base64)
+                                        chunk.text?.let { put("text", it) }
+                                    },
+                                ),
+                            )
+                        }
                     }
+                    drainUntilClose(collector)
                 }
 
                 webSocket("/v1/stream/usb") {
                     hub.usb.value?.let {
                         sendJson(StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
-                    hub.events.collect { event ->
-                        when (event) {
-                            is HubEvent.Usb -> sendJson(
-                                StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(event.overview)),
-                            )
-                            is HubEvent.UsbEventMsg -> sendJson(
-                                StreamEnvelope("usb_event", TimeUtil.nowIso(), json.encodeToJsonElement(event.event)),
-                            )
-                            else -> Unit
+                    val collector = launch {
+                        hub.events.collect { event ->
+                            when (event) {
+                                is HubEvent.Usb -> sendJson(
+                                    StreamEnvelope("usb", TimeUtil.nowIso(), json.encodeToJsonElement(event.overview)),
+                                )
+                                is HubEvent.UsbEventMsg -> sendJson(
+                                    StreamEnvelope("usb_event", TimeUtil.nowIso(), json.encodeToJsonElement(event.event)),
+                                )
+                                else -> Unit
+                            }
                         }
                     }
+                    drainUntilClose(collector)
                 }
 
                 webSocket("/v1/stream") {
@@ -721,41 +806,80 @@ class BridgeServer(
                     hub.location.value?.let {
                         sendJson(StreamEnvelope("location", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
-                    hub.events.filter { it is HubEvent.Location }.collect { event ->
-                        val reading = (event as HubEvent.Location).reading
-                        sendJson(StreamEnvelope("location", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
+                    val collector = launch {
+                        hub.events.filter { it is HubEvent.Location }.collect { event ->
+                            val reading = (event as HubEvent.Location).reading
+                            sendJson(StreamEnvelope("location", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
+                        }
                     }
+                    drainUntilClose(collector)
                 }
 
                 webSocket("/v1/stream/sensors") {
-                    hub.events.filter { it is HubEvent.Sensor }.collect { event ->
-                        val e = event as HubEvent.Sensor
-                        sendJson(
-                            StreamEnvelope(
-                                "sensors",
-                                TimeUtil.nowIso(),
-                                buildJsonObject {
-                                    put(e.typeName, json.encodeToJsonElement(e.reading))
-                                },
-                            ),
-                        )
+                    val collector = launch {
+                        hub.events.filter { it is HubEvent.Sensor }.collect { event ->
+                            val e = event as HubEvent.Sensor
+                            sendJson(
+                                StreamEnvelope(
+                                    "sensors",
+                                    TimeUtil.nowIso(),
+                                    buildJsonObject {
+                                        put(e.typeName, json.encodeToJsonElement(e.reading))
+                                    },
+                                ),
+                            )
+                        }
                     }
+                    drainUntilClose(collector)
                 }
 
                 webSocket("/v1/stream/touch") {
                     hub.touch.value?.let {
                         sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(it)))
                     }
-                    hub.events.filter { it is HubEvent.Touch }.collect { event ->
-                        val reading = (event as HubEvent.Touch).reading
-                        sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
+                    val collector = launch {
+                        hub.events.filter { it is HubEvent.Touch }.collect { event ->
+                            val reading = (event as HubEvent.Touch).reading
+                            sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
+                        }
                     }
+                    drainUntilClose(collector)
                 }
             }
         }
 
         engine.start(wait = false)
         engineRef.set(engine)
+
+        // CIO binds on a background coroutine, so a BindException (port already in
+        // use by Termux/cloudflared or a leftover engine) fires AFTER start() returns
+        // and would otherwise leave us reporting "running" with nothing bound. Probe
+        // the socket to confirm it actually accepts before we declare success.
+        if (!awaitBound()) {
+            runCatching { engineRef.getAndSet(null)?.stop(0, 0) }
+            scope.cancel()
+            throw java.io.IOException("Server did not bind on $bindHost:$port (port in use?)")
+        }
+    }
+
+    /** Poll-connect until the listener accepts, or time out. */
+    private suspend fun awaitBound(timeoutMs: Long = 3000, stepMs: Long = 100): Boolean {
+        // Loopback reaches a 0.0.0.0 or 127.0.0.1 bind; for a specific-IP bind probe that IP.
+        val probeHost = if (bindHost == "0.0.0.0" || bindHost.isBlank()) "127.0.0.1" else bindHost
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    java.net.Socket().use { s ->
+                        s.connect(java.net.InetSocketAddress(probeHost, port), stepMs.toInt())
+                    }
+                    true
+                }.getOrDefault(false)
+            }
+            if (ok) return true
+            delay(stepMs)
+        }
+        return false
     }
 
     suspend fun stop() {
@@ -807,15 +931,158 @@ class BridgeServer(
         send(Frame.Text(json.encodeToString(envelope)))
     }
 
+    /**
+     * Block on the incoming frame channel until the client closes the socket, then
+     * cancel the [collector] job that was pushing events to it. Single-topic stream
+     * handlers previously collected hub.events directly with no incoming loop, so a
+     * dead client on a sparse stream (no GPS fix / no serial traffic) was never
+     * noticed and its collector coroutine lingered forever. Draining `incoming`
+     * makes client-close end the handler and the finally reclaim the collector.
+     */
+    private suspend fun DefaultWebSocketServerSession.drainUntilClose(collector: kotlinx.coroutines.Job) {
+        try {
+            for (frame in incoming) {
+                // Ignore payloads; single-topic streams have no client protocol.
+                // The loop exists purely to observe close/failure of the socket.
+            }
+        } finally {
+            collector.cancel()
+        }
+    }
+
+    /**
+     * DNS-rebind guard. Accepts requests whose Host is loopback, one of this device's
+     * own IPs, or the configured public URL host. A rebinding attacker's page sends
+     * its own domain as Host, so it fails this check. Missing Host (raw curl, some WS
+     * clients) is allowed — a browser always sends one, so its absence isn't the
+     * rebind threat model.
+     */
+    private fun hostAllowed(call: ApplicationCall): Boolean {
+        val host = call.request.header("Host")?.substringBefore(":")?.trim()?.lowercase()
+            ?: return true
+        if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]") return true
+        // Our own addresses (LAN + Tailscale) — the legitimate remote surfaces.
+        if (NetworkAddresses.allIpv4().any { it.ip == host }) return true
+        // Configured Cloudflare/public hostname.
+        val pub = runCatching {
+            publicUrlProvider().takeIf { it.isNotBlank() }
+                ?.let { java.net.URI(it).host?.lowercase() }
+        }.getOrNull()
+        if (pub != null && host == pub) return true
+        return false
+    }
+
+    // (method, path, summary, tag, mutating) — mutating routes need a token even in LOCAL.
+    private data class Route(
+        val method: String,
+        val path: String,
+        val summary: String,
+        val tag: String,
+        val mutating: Boolean = false,
+    )
+
+    private val apiRoutes = listOf(
+        Route("get", "/v1/health", "Liveness, version, uptime", "meta"),
+        Route("get", "/v1/openapi.json", "This OpenAPI descriptor", "meta"),
+        Route("get", "/v1/diagnostics", "Collector health + degraded hints", "meta"),
+        Route("get", "/v1/config", "Server mode, endpoints, auth requirement", "meta"),
+        Route("get", "/v1/capabilities", "Static device capability inventory", "meta"),
+        Route("get", "/v1/debug/log", "Recent server log entries (?n=)", "meta"),
+        Route("post", "/v1/debug/log/clear", "Clear the server log", "meta", mutating = true),
+        Route("get", "/v1/snapshot", "One-shot of all live signals", "telemetry"),
+        Route("get", "/v1/location", "Last known location fix", "telemetry"),
+        Route("get", "/v1/battery", "Battery level and status", "telemetry"),
+        Route("get", "/v1/network", "Network transport + connectivity", "telemetry"),
+        Route("get", "/v1/telephony", "Telephony/cell state", "telemetry"),
+        Route("get", "/v1/audio", "Microphone RMS/peak dB", "telemetry"),
+        Route("get", "/v1/touch", "Latest touch event", "telemetry"),
+        Route("get", "/v1/sensors", "Snapshot of all sensor readings", "telemetry"),
+        Route("get", "/v1/sensors/{type}", "One sensor by type name", "telemetry"),
+        Route("get", "/v1/cameras", "Available cameras", "camera"),
+        Route("post", "/v1/camera/{id}/capture", "Capture a still image", "camera", mutating = true),
+        Route("get", "/v1/camera/last.jpg", "Last captured JPEG bytes", "camera"),
+        Route("post", "/v1/control/start", "Start the bridge service", "control", mutating = true),
+        Route("post", "/v1/control/stop", "Stop the bridge service", "control", mutating = true),
+        Route("get", "/v1/usb", "USB host overview", "usb"),
+        Route("post", "/v1/usb/rescan", "Rescan attached USB devices", "usb", mutating = true),
+        Route("get", "/v1/usb/devices", "Attached USB devices", "usb"),
+        Route("get", "/v1/usb/devices/{id}", "One USB device by id", "usb"),
+        Route("get", "/v1/usb/storage", "USB mass-storage volumes", "usb"),
+        Route("post", "/v1/usb/devices/{id}/permission", "Request USB permission", "usb", mutating = true),
+        Route("post", "/v1/usb/devices/{id}/serial/open", "Open a serial connection", "usb", mutating = true),
+        Route("post", "/v1/usb/devices/{id}/serial/close", "Close a serial connection", "usb", mutating = true),
+        Route("post", "/v1/usb/devices/{id}/serial/write", "Write bytes to serial", "usb", mutating = true),
+    )
+
+    // WebSocket endpoints documented as x-websocket (OpenAPI has no native WS verb).
+    private val wsRoutes = listOf(
+        "/v1/stream" to "Multiplexed stream; ?topics=location,battery,sensors,network,usb,audio,touch",
+        "/v1/stream/location" to "Location events only",
+        "/v1/stream/sensors" to "Sensor events only",
+        "/v1/stream/touch" to "Touch events only",
+        "/v1/stream/usb" to "USB overview + attach/detach events",
+        "/v1/usb/serial/{id}" to "Serial read stream for a device (open serial first)",
+    )
+
+    private fun openApiJson(): String {
+        val doc = buildJsonObject {
+            put("openapi", "3.0.3")
+            put("info", buildJsonObject {
+                put("title", "Device Bridge API")
+                put("version", version)
+                put("description", "Local-first device sensor/USB/camera bridge. Bearer token required off-device; mutating endpoints always require it.")
+            })
+            put("components", buildJsonObject {
+                put("securitySchemes", buildJsonObject {
+                    put("bearerAuth", buildJsonObject {
+                        put("type", "http")
+                        put("scheme", "bearer")
+                    })
+                })
+            })
+            put("paths", buildJsonObject {
+                apiRoutes.forEach { r ->
+                    put(r.path, buildJsonObject {
+                        put(r.method, buildJsonObject {
+                            put("summary", r.summary)
+                            put("tags", buildJsonArray { add(JsonPrimitive(r.tag)) })
+                            if (r.mutating || authEnabled) {
+                                put("security", buildJsonArray {
+                                    add(buildJsonObject {
+                                        put("bearerAuth", buildJsonArray {})
+                                    })
+                                })
+                            }
+                            put("responses", buildJsonObject {
+                                put("200", buildJsonObject { put("description", "OK") })
+                            })
+                        })
+                    })
+                }
+            })
+            put("x-websocket", buildJsonObject {
+                wsRoutes.forEach { (path, desc) -> put(path, JsonPrimitive(desc)) }
+            })
+        }
+        return json.encodeToString(JsonObject.serializer(), doc)
+    }
+
     private fun authorized(call: ApplicationCall): Boolean {
         val expected = authToken ?: return true
         val header = call.request.header("Authorization")
         if (header != null && header.startsWith("Bearer ", ignoreCase = true)) {
-            if (header.substring(7).trim() == expected) return true
+            if (constantTimeEquals(header.substring(7).trim(), expected)) return true
         }
+        // WebSocket clients often pass the token as a query param.
         val q = call.request.queryParameters["token"]
-        if (q != null && q == expected) return true
-        // WebSocket clients often pass token as query
+        if (q != null && constantTimeEquals(q, expected)) return true
         return false
     }
+
+    /** Length-independent, byte-wise constant-time comparison to avoid a timing side channel. */
+    private fun constantTimeEquals(a: String, b: String): Boolean =
+        java.security.MessageDigest.isEqual(
+            a.toByteArray(Charsets.UTF_8),
+            b.toByteArray(Charsets.UTF_8),
+        )
 }

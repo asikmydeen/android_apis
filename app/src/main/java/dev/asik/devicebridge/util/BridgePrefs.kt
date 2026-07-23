@@ -87,14 +87,12 @@ object BridgePrefs {
     }
 
     fun setNetworkMode(context: Context, mode: NetworkMode) {
-        val bind = when (mode) {
-            NetworkMode.LOCAL, NetworkMode.CLOUDFLARE -> "127.0.0.1"
-            NetworkMode.LAN, NetworkMode.TAILSCALE -> "0.0.0.0"
-        }
         val forceAuth = mode != NetworkMode.LOCAL
         prefs(context).edit()
             .putString(KEY_NETWORK_MODE, mode.name)
-            .putString(KEY_BIND_HOST, bind)
+            // Bind host is derived dynamically in bindHost() so it can't go stale
+            // (the Tailscale IP in particular changes); don't persist it here.
+            .remove(KEY_BIND_HOST)
             .putBoolean(KEY_AUTH_ENABLED, if (forceAuth) true else prefs(context).getBoolean(KEY_AUTH_ENABLED, false))
             .apply()
         if (forceAuth) {
@@ -102,12 +100,20 @@ object BridgePrefs {
         }
     }
 
+    /**
+     * The interface the server binds to. Computed at read time so TAILSCALE tracks
+     * the current tailnet IP. TAILSCALE binds ONLY the Tailscale interface (not
+     * 0.0.0.0) so the plaintext API isn't also exposed on the untrusted local Wi-Fi;
+     * if no Tailscale IP is present it falls back to loopback (safe) rather than
+     * all-interfaces (leaky).
+     */
     fun bindHost(context: Context): String {
-        return prefs(context).getString(KEY_BIND_HOST, null)
-            ?: when (networkMode(context)) {
-                NetworkMode.LOCAL, NetworkMode.CLOUDFLARE -> "127.0.0.1"
-                NetworkMode.LAN, NetworkMode.TAILSCALE -> "0.0.0.0"
-            }
+        return when (networkMode(context)) {
+            NetworkMode.LOCAL, NetworkMode.CLOUDFLARE -> "127.0.0.1"
+            NetworkMode.LAN -> "0.0.0.0"
+            NetworkMode.TAILSCALE ->
+                NetworkAddresses.tailscaleIps().firstOrNull() ?: "127.0.0.1"
+        }
     }
 
     fun port(context: Context): Int =
