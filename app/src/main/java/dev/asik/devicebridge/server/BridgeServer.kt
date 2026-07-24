@@ -1255,6 +1255,14 @@ wscat -c "ws://&lt;host&gt;:$port/v1/stream?token=&lt;token&gt;"
 # JavaScript (audio levels only)
 const ws = new WebSocket("ws://&lt;host&gt;:$port/v1/stream?topics=audio&amp;token=&lt;token&gt;");
 ws.onmessage = (e) => console.log(JSON.parse(e.data));</pre>
+            <h2>Use with an AI agent (MCP)</h2>
+            <p>An MCP server adapter is included in the repo under <code>mcp/</code>. It exposes this
+               device to Claude / Cursor / any MCP client as tools (read sensors, capture a photo,
+               launch apps, speak, torch, notify). Build it, then register it with your agent:</p>
+            <pre>cd mcp &amp;&amp; npm install &amp;&amp; npm run build
+
+claude mcp add devicebridge -- node /path/to/mcp/dist/index.js \
+  -e BRIDGE_URL=&lt;this URL&gt; -e BRIDGE_TOKEN=&lt;token&gt;</pre>
           </div>
           <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
           <script>

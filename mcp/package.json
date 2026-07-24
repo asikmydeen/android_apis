@@ -1,0 +1,29 @@
+{
+  "name": "@devicebridge/mcp",
+  "version": "1.0.0",
+  "description": "MCP server that exposes a Device Bridge (SensIO) phone to AI agents — read sensors and operate the device over the local bridge API.",
+  "type": "module",
+  "bin": {
+    "devicebridge-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
