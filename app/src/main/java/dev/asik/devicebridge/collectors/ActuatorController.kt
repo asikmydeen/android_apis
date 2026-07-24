@@ -1,13 +1,16 @@
 package dev.asik.devicebridge.collectors
 
+import android.app.ActivityOptions
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.VibratorManager
 import android.os.Vibrator
 import android.os.VibrationEffect
@@ -33,16 +36,13 @@ class ActuatorController(private val context: Context) {
 
     fun launchApp(pkg: String): Pair<Boolean, String> {
         // Launching from a non-Activity context (the Ktor server) REQUIRES NEW_TASK
-        // or Android throws. getLaunchIntentForPackage returns null if not installed.
-        val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-            ?: return false to "not installed: $pkg"
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val direct = runCatching {
-            context.startActivity(intent)
-            true
-        }.getOrDefault(false)
-        // Android 10+ Background Activity Launch often blocks service→activity starts
-        // even when startActivity doesn't throw. Always offer a tappable notification.
+        // or Android throws. getLaunchIntentForPackage can return null either because
+        // the app is missing OR because of Android 11+ package visibility — see <queries>.
+        val intent = resolveLaunchIntent(pkg)
+            ?: return false to "not installed or not visible: $pkg (check package name / <queries>)"
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val direct = startActivityFromBridge(intent)
+        // Always offer a tappable notification when BAL blocks the jump.
         postDeepLinkNotification("Open app", pkg, intent)
         return if (direct) {
             true to "launched $pkg (also posted notification)"
@@ -52,25 +52,35 @@ class ActuatorController(private val context: Context) {
     }
 
     fun fireIntent(action: String, uri: String?, pkg: String?): Pair<Boolean, String> {
-        val intent = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val intent = Intent(action)
+            .addCategory(Intent.CATEGORY_DEFAULT)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         if (!uri.isNullOrBlank()) intent.data = Uri.parse(uri)
         if (!pkg.isNullOrBlank()) intent.setPackage(pkg)
 
+        // Prefer Google Maps for map-ish URIs when no package was forced.
+        if (pkg.isNullOrBlank() && uriLooksLikeMaps(uri)) {
+            preferPackageIfVisible(intent, "com.google.android.apps.maps")
+        }
+
         // Verify something can handle it (unless package forces a specific app).
-        if (pkg.isNullOrBlank()) {
+        if (pkg.isNullOrBlank() && intent.`package` == null) {
             val resolved = intent.resolveActivity(context.packageManager)
             if (resolved == null) {
                 return false to "no app can handle $action ${uri ?: ""}".trim()
             }
+        } else if (!pkg.isNullOrBlank() || intent.`package` != null) {
+            val target = pkg ?: intent.`package`!!
+            if (!isPackageVisible(target)) {
+                // Fall back to open without package so a browser/chooser can still work.
+                intent.`package` = null
+            }
         }
 
-        val direct = runCatching {
-            context.startActivity(intent)
-            true
-        }.getOrDefault(false)
+        val direct = startActivityFromBridge(intent)
 
         val label = when {
-            !uri.isNullOrBlank() && uri.contains("maps", ignoreCase = true) -> "Open directions"
+            uriLooksLikeMaps(uri) -> "Open directions in Maps"
             !uri.isNullOrBlank() -> "Open link"
             else -> "Open"
         }
@@ -82,6 +92,64 @@ class ActuatorController(private val context: Context) {
         } else {
             true to "background launch blocked; tap the notification to open"
         }
+    }
+
+    /** Prefer [pkg] when PackageManager can see it (requires manifest <queries>). */
+    private fun preferPackageIfVisible(intent: Intent, pkg: String) {
+        if (isPackageVisible(pkg)) intent.setPackage(pkg)
+    }
+
+    private fun isPackageVisible(pkg: String): Boolean {
+        return runCatching {
+            context.packageManager.getPackageInfo(pkg, 0)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun resolveLaunchIntent(pkg: String): Intent? {
+        val pm = context.packageManager
+        pm.getLaunchIntentForPackage(pkg)?.let { return it }
+        // Fallback: manual MAIN/LAUNCHER lookup (still needs <queries> to see the app).
+        val probe = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(pkg)
+        val match = pm.queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY).firstOrNull()
+            ?: return null
+        return Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setClassName(match.activityInfo.packageName, match.activityInfo.name)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    private fun uriLooksLikeMaps(uri: String?): Boolean {
+        if (uri.isNullOrBlank()) return false
+        val u = uri.lowercase()
+        return u.startsWith("geo:") ||
+            u.startsWith("google.navigation:") ||
+            u.contains("maps.google.") ||
+            u.contains("google.com/maps") ||
+            u.contains("maps.app.goo.gl")
+    }
+
+    /**
+     * startActivity with Android 14+ BAL options when available so FGS→activity
+     * transitions are more likely to be allowed.
+     */
+    private fun startActivityFromBridge(intent: Intent): Boolean {
+        return runCatching {
+            val opts = backgroundStartOptions()
+            if (opts != null) context.startActivity(intent, opts) else context.startActivity(intent)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun backgroundStartOptions(): Bundle? {
+        if (Build.VERSION.SDK_INT < 34) return null
+        return runCatching {
+            ActivityOptions.makeBasic()
+                .setPendingIntentCreatorBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+                )
+                .toBundle()
+        }.getOrNull()
     }
 
     /**
@@ -104,12 +172,23 @@ class ActuatorController(private val context: Context) {
             nm.createNotificationChannel(ch)
         }
         val req = ACTION_NOTIFICATION_ID_BASE + (notifyCounter++ and 0xFFFF)
-        val pi = PendingIntent.getActivity(
-            context,
-            req,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pi = if (Build.VERSION.SDK_INT >= 34) {
+            val opts = runCatching {
+                ActivityOptions.makeBasic()
+                    .setPendingIntentCreatorBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+                    )
+                    .toBundle()
+            }.getOrNull()
+            if (opts != null) {
+                PendingIntent.getActivity(context, req, intent, flags, opts)
+            } else {
+                PendingIntent.getActivity(context, req, intent, flags)
+            }
+        } else {
+            PendingIntent.getActivity(context, req, intent, flags)
+        }
         return runCatching {
             val n = NotificationCompat.Builder(context, DEEP_LINK_CHANNEL_ID)
                 .setContentTitle(title)
