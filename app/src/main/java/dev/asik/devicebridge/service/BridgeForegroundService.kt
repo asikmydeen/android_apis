@@ -1,6 +1,5 @@
 package dev.asik.devicebridge.service
 
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -48,6 +47,8 @@ class BridgeForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // Explicit user stop — do not auto-restart.
+                ServiceKeepAlive.markDesired(this, false)
                 scope.launch {
                     releaseLocks()
                     BridgeRuntime.stopServer()
@@ -56,25 +57,32 @@ class BridgeForegroundService : Service() {
                 }
                 return START_NOT_STICKY
             }
+            // Re-apply startForeground with the current type mask (e.g. after the
+            // user enables the microphone collector). Without this, Android 14+
+            // keeps the old type set and AudioRecord only works while the app UI
+            // is in the foreground — remote PCM clients get digital silence.
+            ACTION_REFRESH_TYPES -> {
+                promoteToForeground()
+                updateNotification()
+                return START_STICKY
+            }
             else -> {
-                val notification = buildNotification()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceCompat.startForeground(
-                        this,
-                        NOTIFICATION_ID,
-                        notification,
-                        foregroundServiceType(),
-                    )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
-                }
+                // User (or keepalive) wants the service up — persist across kills.
+                ServiceKeepAlive.markDesired(this, true)
+                promoteToForeground()
                 acquireLocks()
                 scope.launch {
                     runCatching {
                         BridgeRuntime.startServer()
+                        // Re-assert types after collectors start so a late-granted
+                        // RECORD_AUDIO (or streamAudio pref) is reflected immediately.
+                        promoteToForeground()
                         updateNotification()
+                        ServiceKeepAlive.scheduleWatchdog(this@BridgeForegroundService)
                     }.onFailure {
                         releaseLocks()
+                        // Keep desired=true so the watchdog / alarm can retry.
+                        ServiceKeepAlive.scheduleRestart(this@BridgeForegroundService, "start_failed")
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
@@ -82,6 +90,21 @@ class BridgeForegroundService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    /** startForeground with the type mask that matches current perms + prefs. */
+    private fun promoteToForeground() {
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                foregroundServiceType(),
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun acquireLocks() {
@@ -134,43 +157,49 @@ class BridgeForegroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        if (BridgeRuntime.running.value) {
-            val restartServiceIntent = Intent(applicationContext, BridgeForegroundService::class.java)
-            val restartPendingIntent = PendingIntent.getService(
-                applicationContext,
-                1,
-                restartServiceIntent,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
-            )
-            val alarmService = applicationContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            // A plain RTC set() is heavily deferred (or dropped) by Doze / App-Standby
-            // on Samsung — the stated target device — so the bridge often never came
-            // back after swipe-away. setExactAndAllowWhileIdle + RTC_WAKEUP fires even
-            // in idle, restoring the always-reachable guarantee.
-            runCatching {
-                alarmService?.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    System.currentTimeMillis() + 1000,
-                    restartPendingIntent,
-                )
-            }
+        // Swiping the task away must NOT end the bridge — re-assert FGS + schedule
+        // a restart if the process is still about to be reaped.
+        if (ServiceKeepAlive.isDesired(this)) {
+            promoteToForeground()
+            ServiceKeepAlive.scheduleRestart(this, "task_removed")
+            ServiceKeepAlive.scheduleWatchdog(this)
         }
     }
 
+    /**
+     * Build the FGS type bitmask for the capabilities we actually use right now.
+     *
+     * Android 14+ (UPSIDE_DOWN_CAKE) requires [ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE]
+     * on the active foreground service or background [android.media.AudioRecord] is
+     * denied / returns silence — which is exactly what remote PCM clients saw when
+     * the app left the foreground.
+     *
+     * Microphone is only claimed when the user has both RECORD_AUDIO and the
+     * Microphone collector enabled, so we don't hold a mic FGS type idle.
+     */
     private fun foregroundServiceType(): Int {
         val hasLocation = PermissionHelper.hasLocation(this)
         val hasCamera = PermissionHelper.hasCamera(this)
+        // Claim MIC whenever the collector is on (levels and/or raw PCM both need it).
+        // Without this bit, Android 14+ feeds silence to AudioRecord in the background.
+        val hasMic =
+            PermissionHelper.hasMicrophone(this) &&
+                (BridgePrefs.streamAudio(this) || BridgePrefs.streamRawAudio(this))
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             if (hasLocation) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
             if (hasCamera) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            if (hasMic) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             type
         } else {
+            // Pre-34 typed FGS constants: LOCATION is the portable one. Camera/mic
+            // type bits only exist on API 34+.
             if (hasLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
         }
     }
 
     override fun onDestroy() {
+        val wantRestart = ServiceKeepAlive.isDesired(this)
         releaseLocks()
         // Never block the main thread here — onDestroy runs on the main thread and
         // engine.stop() can take up to ~2s, an ANR during system-initiated teardown.
@@ -178,6 +207,10 @@ class BridgeForegroundService : Service() {
         // this is best-effort cleanup on an independent scope for the killed case.
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { BridgeRuntime.stopServer() }
+        }
+        if (wantRestart) {
+            // System is tearing us down (LMK / OEM killer). Schedule a bounce.
+            ServiceKeepAlive.scheduleRestart(this, "service_destroyed")
         }
         scope.cancel()
         super.onDestroy()
@@ -234,6 +267,7 @@ class BridgeForegroundService : Service() {
         const val CHANNEL_ID = "bridge_service"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "dev.asik.devicebridge.STOP"
+        const val ACTION_REFRESH_TYPES = "dev.asik.devicebridge.REFRESH_TYPES"
 
         // Wake lock: request a bounded grant and renew comfortably before it lapses,
         // so the lock is held for the whole session without an unbounded acquire.
@@ -252,6 +286,19 @@ class BridgeForegroundService : Service() {
         fun stop(context: Context) {
             context.startService(
                 Intent(context, BridgeForegroundService::class.java).setAction(ACTION_STOP),
+            )
+        }
+
+        /**
+         * Re-apply the FGS type mask while the service is already running.
+         * Call after toggling Microphone / granting RECORD_AUDIO so background
+         * capture picks up FOREGROUND_SERVICE_TYPE_MICROPHONE without a full stop.
+         */
+        fun refreshTypes(context: Context) {
+            if (!BridgeRuntime.running.value) return
+            context.startService(
+                Intent(context, BridgeForegroundService::class.java)
+                    .setAction(ACTION_REFRESH_TYPES),
             )
         }
     }

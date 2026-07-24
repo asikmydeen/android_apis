@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.asik.devicebridge.BridgeRuntime
+import dev.asik.devicebridge.service.BridgeForegroundService
 import dev.asik.devicebridge.ui.components.CollapsibleGlassCard
 import dev.asik.devicebridge.ui.components.GlassCard
 import dev.asik.devicebridge.ui.components.GlassText
@@ -57,6 +58,9 @@ fun SettingsScreen() {
     var currentTheme by remember { mutableStateOf(BridgePrefs.themeMode(context)) }
     var keepAwake by remember { mutableStateOf(BridgePrefs.keepAwake(context)) }
     var startOnBoot by remember { mutableStateOf(BridgePrefs.startOnBoot(context)) }
+    var serviceDesired by remember {
+        mutableStateOf(BridgePrefs.serviceDesired(context) || running)
+    }
     var streamLoc by remember { mutableStateOf(BridgePrefs.streamLocation(context)) }
     var streamSensors by remember { mutableStateOf(BridgePrefs.streamSensors(context)) }
     var streamAudio by remember { mutableStateOf(BridgePrefs.streamAudio(context)) }
@@ -105,7 +109,9 @@ fun SettingsScreen() {
         GlassCard {
             SectionLabel("Service protection")
             GlassText(
-                "Keeps the bridge alive and prevents CPU/Wi-Fi sleep when the screen is off.",
+                "Runs as a sticky foreground service with a persistent notification. " +
+                    "Survives swipe-away from Recents; restarts after kills and reboots " +
+                    "(when enabled below). On Samsung, also set battery usage to Unrestricted.",
                 secondary = true,
                 size = 12.sp,
             )
@@ -117,6 +123,23 @@ fun SettingsScreen() {
                 startOnBoot = it
                 BridgePrefs.setStartOnBoot(context, it)
             }
+            PrefSwitch(
+                "Always keep service running",
+                serviceDesired,
+            ) { on ->
+                serviceDesired = on
+                if (on) {
+                    BridgeForegroundService.start(context)
+                } else {
+                    BridgeForegroundService.stop(context)
+                }
+            }
+            GlassText(
+                "When on: auto-restarts if Android or Samsung kills the process. " +
+                    "When off: uses the Home screen Start/Stop toggle only.",
+                secondary = true,
+                size = 12.sp,
+            )
         }
 
         // ---- Server --------------------------------------------------
@@ -160,7 +183,13 @@ fun SettingsScreen() {
             GlassText("Disable to save battery. Restart the bridge to apply.", secondary = true, size = 12.sp)
             PrefSwitch("Location", streamLoc) { streamLoc = it; BridgePrefs.setStreamLocation(context, it) }
             PrefSwitch("Sensors", streamSensors) { streamSensors = it; BridgePrefs.setStreamSensors(context, it) }
-            PrefSwitch("Microphone", streamAudio) { streamAudio = it; BridgePrefs.setStreamAudio(context, it) }
+            PrefSwitch("Microphone", streamAudio) {
+                streamAudio = it
+                BridgePrefs.setStreamAudio(context, it)
+                // Keep FGS type mask in sync so background mic works without a full
+                // stop/start when the user flips this toggle.
+                BridgeForegroundService.refreshTypes(context)
+            }
             PrefSwitch("Touchscreen", streamTouch) { streamTouch = it; BridgePrefs.setStreamTouch(context, it) }
             PrefSwitch("USB", streamUsb) { streamUsb = it; BridgePrefs.setStreamUsb(context, it) }
             ActionButton("Enable global touch tracking (Accessibility)", fullWidth = true) {

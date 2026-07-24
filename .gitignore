@@ -23,3 +23,9 @@ out/
 *.keystore
 keystore.properties
 
+local.properties
+*.jpg
+mic_clip.wav
+capture.jpg
+front_capture.jpg
+last.jpg

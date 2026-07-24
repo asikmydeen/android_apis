@@ -45,4 +45,8 @@ object PermissionHelper {
     fun hasCamera(context: Context): Boolean {
         return isGranted(context, Manifest.permission.CAMERA)
     }
+
+    fun hasMicrophone(context: Context): Boolean {
+        return isGranted(context, Manifest.permission.RECORD_AUDIO)
+    }
 }

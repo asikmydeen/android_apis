@@ -179,9 +179,13 @@ fun DashboardScreen() {
                     if (!permissionState.allPermissionsGranted) {
                         permissionState.launchMultiplePermissionRequest()
                     }
+                    // Sticky FGS: survives swipe-away; restart-on-kill while desired.
                     BridgeForegroundService.start(context)
                 },
-                onStop = { BridgeForegroundService.stop(context) },
+                onStop = {
+                    // Explicit stop clears serviceDesired so keepalive won't bounce back.
+                    BridgeForegroundService.stop(context)
+                },
             )
 
             Row(
@@ -240,6 +244,9 @@ fun DashboardScreen() {
                     micAction = {
                         micEnabled = true
                         BridgePrefs.setStreamAudio(context, true)
+                        // Promote FGS to include MICROPHONE *before* collectors restart
+                        // so background AudioRecord is legal on Android 14+.
+                        BridgeForegroundService.refreshTypes(context)
                         scope.launch {
                             if (running) BridgeRuntime.restartServerIfRunning()
                         }

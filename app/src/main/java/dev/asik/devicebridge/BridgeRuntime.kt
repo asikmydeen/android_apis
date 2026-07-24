@@ -15,6 +15,7 @@ import dev.asik.devicebridge.collectors.UsbCollector
 import dev.asik.devicebridge.hub.ConnectionRegistry
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
+import dev.asik.devicebridge.service.BridgeForegroundService
 import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.ErrorLog
 import dev.asik.devicebridge.util.MdnsAdvertiser
@@ -34,7 +35,7 @@ import kotlinx.coroutines.sync.withLock
  * Process-wide runtime shared by the UI and foreground service.
  */
 object BridgeRuntime {
-    const val VERSION = "1.3.0"
+    const val VERSION = "1.3.1"
 
     private val job = SupervisorJob()
     val scope = CoroutineScope(job + Dispatchers.Default)
@@ -240,6 +241,12 @@ object BridgeRuntime {
         if (was) {
             stopServer()
             startServer()
+            // Collector toggles (esp. Microphone) change the FGS type mask required
+            // for background capture on Android 14+. Refresh so AudioRecord isn't
+            // silenced the moment the UI leaves the foreground.
+            runCatching {
+                BridgeForegroundService.refreshTypes(requireContext())
+            }
         } else {
             refreshNetworkConfigFromPrefs()
         }

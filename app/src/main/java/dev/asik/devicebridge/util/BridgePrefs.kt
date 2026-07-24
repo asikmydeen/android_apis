@@ -29,6 +29,7 @@ enum class NetworkMode {
 object BridgePrefs {
     private const val NAME = "device_bridge_prefs"
     private const val KEY_START_ON_BOOT = "start_on_boot"
+    private const val KEY_SERVICE_DESIRED = "service_desired"
     private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_KEEP_AWAKE = "keep_awake"
     private const val KEY_NETWORK_MODE = "network_mode"
@@ -75,10 +76,23 @@ object BridgePrefs {
     }
 
     fun startOnBoot(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_START_ON_BOOT, false)
+        // Default ON so a reinstall/fresh install keeps the bridge as a sticky service.
+        prefs(context).getBoolean(KEY_START_ON_BOOT, true)
 
     fun setStartOnBoot(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_START_ON_BOOT, enabled).apply()
+    }
+
+    /**
+     * Whether the user currently wants the foreground service running.
+     * Survives process death so swipe-away / LMK can restart the bridge.
+     * Cleared only by an explicit Stop action.
+     */
+    fun serviceDesired(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_SERVICE_DESIRED, false)
+
+    fun setServiceDesired(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_SERVICE_DESIRED, enabled).apply()
     }
 
     fun networkMode(context: Context): NetworkMode {
