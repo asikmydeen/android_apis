@@ -12,6 +12,7 @@ import dev.asik.devicebridge.collectors.SensorCollector
 import dev.asik.devicebridge.collectors.TelephonyCollector
 import dev.asik.devicebridge.collectors.TouchCollector
 import dev.asik.devicebridge.collectors.UsbCollector
+import dev.asik.devicebridge.hub.ConnectionRegistry
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.server.BridgeServer
 import dev.asik.devicebridge.util.BridgePrefs
@@ -39,6 +40,7 @@ object BridgeRuntime {
     val scope = CoroutineScope(job + Dispatchers.Default)
 
     val hub = StreamHub()
+    val registry = ConnectionRegistry()
 
     @Volatile
     private var appContext: Context? = null
@@ -149,6 +151,7 @@ object BridgeRuntime {
                 cameraCollector = cameraCollector,
                 usbCollector = usbCollector,
                 actuator = actuator,
+                registry = registry,
                 bindHost = bind,
                 port = p,
                 version = VERSION,
@@ -215,6 +218,20 @@ object BridgeRuntime {
             _startedAtMs.value = 0L
             ErrorLog.info("server_stop", "Bridge stopped")
         }
+    }
+
+    /**
+     * Panic kill-switch: hard-disconnect every client and rotate the token so REST
+     * callers are locked out instantly. The bridge + collectors stay alive. Clients
+     * must re-pair with the new token. Returns the new token.
+     */
+    suspend fun disconnectAllClients(): String {
+        registry.closeAll("disconnected by owner")
+        val newToken = BridgePrefs.rotateToken(requireContext())
+        // Token is captured at server construction, so bounce the server to apply it.
+        restartServerIfRunning()
+        ErrorLog.warn("panic_disconnect", "all clients disconnected; token rotated")
+        return newToken
     }
 
     /** Apply prefs and bounce the server if it was running. */

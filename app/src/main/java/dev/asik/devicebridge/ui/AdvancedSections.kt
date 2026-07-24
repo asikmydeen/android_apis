@@ -52,6 +52,7 @@ import dev.asik.devicebridge.ui.components.SectionLabel
 import dev.asik.devicebridge.ui.components.glass
 import dev.asik.devicebridge.ui.theme.rememberGlassTokens
 import dev.asik.devicebridge.util.ErrorLog
+import dev.asik.devicebridge.util.TimeUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -181,6 +182,27 @@ fun AdvancedDiagnostics() {
         SmallAction("Copy capture curl") {
             copy(context, "curl -s -X POST http://127.0.0.1:$port/v1/camera/0/capture")
             Toast.makeText(context, "Capture curl copied", Toast.LENGTH_SHORT).show()
+        }
+
+        Divider()
+
+        // ---- Activity log: accepted API requests (who did what) -------
+        val requests by BridgeRuntime.registry.recentRequests.collectAsState()
+        SectionLabel("Activity log · ${requests.size}")
+        GlassText("Recent API requests served (newest first).", secondary = true, size = 12.sp)
+        if (requests.isEmpty()) {
+            GlassText("No requests yet.", secondary = true, size = 12.sp)
+        } else {
+            requests.take(30).forEach { r ->
+                val clock = TimeUtil.clockOf(r.tsMs)
+                Text(
+                    "$clock  ${r.status}  ${r.method} ${r.path}  · ${r.remoteIp}",
+                    color = if (r.status in 200..299) g.textSecondary else g.warn,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+            }
         }
 
         Divider()

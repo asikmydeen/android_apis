@@ -94,6 +94,7 @@ fun DashboardScreen() {
     val permissionState = rememberMultiplePermissionsState(PermissionHelper.runtimePermissions)
     val micPermission = rememberPermissionState(android.Manifest.permission.RECORD_AUDIO)
     var micEnabled by remember { mutableStateOf(BridgePrefs.streamAudio(context)) }
+    var showDisconnectConfirm by remember { mutableStateOf(false) }
     var diagHint by remember { mutableStateOf<String?>(null) }
     var batteryOk by remember {
         mutableStateOf(DiagnosticsBuilder.isIgnoringBatteryOptimizations(context))
@@ -111,6 +112,18 @@ fun DashboardScreen() {
             delay(4000)
         }
     }
+
+    // Ticks every second so the privacy dots reflect the registry's rolling
+    // "remotely active in the last 3s" window without waiting on collector updates.
+    var remoteTick by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            remoteTick = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    fun remotelyReading(signal: String): Boolean =
+        BridgeRuntime.registry.isRemotelyActive(signal, remoteTick)
 
     val localUrl = "http://127.0.0.1:$port"
     val batteryPct = battery?.percent
@@ -243,7 +256,7 @@ fun DashboardScreen() {
                 icon = Icons.Default.Mic,
                 label = "Microphone",
                 value = micValue,
-                live = audio != null,
+                live = remotelyReading("audio"),
                 hint = micHint,
                 onClick = micAction,
             )
@@ -252,7 +265,7 @@ fun DashboardScreen() {
                 icon = Icons.Default.GpsFixed,
                 label = "Location",
                 value = if (gpsLocked) "locked" else if (location != null) "stale" else "no fix",
-                live = gpsLocked,
+                live = remotelyReading("location"),
             )
         }
         Row(
@@ -264,14 +277,14 @@ fun DashboardScreen() {
                 icon = Icons.Default.Sensors,
                 label = "Sensors",
                 value = "${sensors.size} live",
-                live = running && sensors.isNotEmpty(),
+                live = remotelyReading("sensors"),
             )
             VitalTile(
                 modifier = Modifier.weight(1f).fillMaxHeight(),
                 icon = Icons.Default.Usb,
                 label = "USB",
                 value = usb?.let { "${it.device_count} dev" } ?: "—",
-                live = (usb?.device_count ?: 0) > 0,
+                live = remotelyReading("usb"),
             )
         }
 
@@ -329,6 +342,59 @@ fun DashboardScreen() {
                 }
             }
         }
+
+        // ---- Connected clients + panic disconnect (only while running) ----
+        if (running) {
+            val clients by BridgeRuntime.registry.activeClients.collectAsState()
+            GlassCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionLabel(
+                        "Connected clients · ${clients.size}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    LiveDot(active = clients.isNotEmpty(), size = 8.dp)
+                }
+                if (clients.isEmpty()) {
+                    GlassText("No clients connected right now.", secondary = true, size = 12.sp)
+                } else {
+                    clients.take(5).forEach { c ->
+                        GlassText("${c.kind} · ${c.remoteIp}", secondary = true, size = 12.sp)
+                    }
+                }
+                PillButton(
+                    "Disconnect all & rotate token",
+                    modifier = Modifier.fillMaxWidth(),
+                ) { showDisconnectConfirm = true }
+            }
+        }
+    }
+
+    if (showDisconnectConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDisconnectConfirm = false },
+            title = { androidx.compose.material3.Text("Disconnect all clients?") },
+            text = {
+                androidx.compose.material3.Text(
+                    "This closes every open connection and rotates the access token, locking out " +
+                        "all current clients immediately. The bridge keeps running, but you'll need to " +
+                        "re-share the new token (or QR) to reconnect anything.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    showDisconnectConfirm = false
+                    scope.launch {
+                        BridgeRuntime.disconnectAllClients()
+                        Toast.makeText(context, "Disconnected all clients · token rotated", Toast.LENGTH_LONG).show()
+                    }
+                }) { androidx.compose.material3.Text("Disconnect all") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showDisconnectConfirm = false }) {
+                    androidx.compose.material3.Text("Cancel")
+                }
+            },
+        )
     }
 }
 

@@ -6,6 +6,7 @@ import dev.asik.devicebridge.collectors.ActuatorController
 import dev.asik.devicebridge.collectors.CameraCollector
 import dev.asik.devicebridge.collectors.CapabilityScanner
 import dev.asik.devicebridge.collectors.UsbCollector
+import dev.asik.devicebridge.hub.ConnectionRegistry
 import dev.asik.devicebridge.hub.HubEvent
 import dev.asik.devicebridge.hub.StreamHub
 import dev.asik.devicebridge.model.ApiError
@@ -43,6 +44,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.plugins.origin
 import io.ktor.server.request.header
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
@@ -86,6 +88,7 @@ class BridgeServer(
     private val cameraCollector: CameraCollector,
     private val usbCollector: UsbCollector,
     private val actuator: ActuatorController,
+    private val registry: ConnectionRegistry,
     private val bindHost: String,
     private val port: Int,
     private val version: String,
@@ -147,6 +150,27 @@ class BridgeServer(
                             ),
                         ),
                     )
+                }
+            }
+
+            // Audit monitor: record every request's final status into the registry
+            // (the in-app Activity log + connected-clients view read from here). Runs
+            // in the Monitoring phase so it wraps auth and sees the real response code.
+            intercept(ApplicationCallPipeline.Monitoring) {
+                val method = call.request.httpMethod
+                if (method == HttpMethod.Options) return@intercept
+                val ip = runCatching { call.request.origin.remoteHost }.getOrDefault("?")
+                val path = call.request.path()
+                try {
+                    proceed()
+                } finally {
+                    val status = call.response.status()?.value ?: 0
+                    // Skip the noisy docs/landing shells; keep real API traffic.
+                    if (path != "/" && path != "/docs") {
+                        registry.recordRequest(ip, method.value, path, status, System.currentTimeMillis())
+                        // Mark per-signal remote reads so privacy dots reflect actual egress.
+                        markSignalRead(path)
+                    }
                 }
             }
 
@@ -262,6 +286,32 @@ class BridgeServer(
 
                 get("/v1/diagnostics") {
                     call.respond(DiagnosticsBuilder.build(this@BridgeServer.context))
+                }
+
+                get("/v1/clients") {
+                    // Who is connected right now (active WS sessions).
+                    val clients = registry.activeClients.value.map {
+                        buildJsonObject {
+                            put("id", it.id)
+                            put("remote_ip", it.remoteIp)
+                            put("kind", it.kind)
+                            put("topics", JsonPrimitive(it.topics.joinToString(",")))
+                            put("connected_at_ms", it.connectedAtMs)
+                        }
+                    }
+                    call.respond(buildJsonObject {
+                        put("count", clients.size)
+                        put("clients", kotlinx.serialization.json.JsonArray(clients))
+                    })
+                }
+
+                post("/v1/clients/disconnect") {
+                    // Panic path: respond first, then disconnect+rotate on the runtime's
+                    // own scope — we can't await a restart of the server handling THIS call.
+                    call.respond(SimpleStatus(true, "disconnecting all clients and rotating token"))
+                    dev.asik.devicebridge.BridgeRuntime.scope.launch {
+                        runCatching { dev.asik.devicebridge.BridgeRuntime.disconnectAllClients() }
+                    }
                 }
 
                 get("/v1/debug/log") {
@@ -642,7 +692,7 @@ class BridgeServer(
                             )
                         }
                     }
-                    drainUntilClose(collector)
+                    drainUntilClose(collector, "usb/serial", listOf("usb"))
                 }
 
                 webSocket("/v1/stream/usb") {
@@ -662,7 +712,7 @@ class BridgeServer(
                             }
                         }
                     }
-                    drainUntilClose(collector)
+                    drainUntilClose(collector, "stream/usb", listOf("usb"))
                 }
 
                 webSocket("/v1/stream") {
@@ -674,6 +724,11 @@ class BridgeServer(
                         ?: mutableSetOf("location", "battery", "sensors", "network", "usb", "audio", "touch")
 
                     val topics = initial
+
+                    val streamClientIp = runCatching { call.request.origin.remoteHost }.getOrDefault("?")
+                    val streamClientId = registry.register(
+                        streamClientIp, topics.toList(), "stream", this, System.currentTimeMillis(),
+                    )
 
                     sendJson(
                         StreamEnvelope(
@@ -855,6 +910,7 @@ class BridgeServer(
                         }
                     } finally {
                         collector.cancel()
+                        registry.remove(streamClientId)
                     }
                 }
 
@@ -868,7 +924,7 @@ class BridgeServer(
                             sendJson(StreamEnvelope("location", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
                         }
                     }
-                    drainUntilClose(collector)
+                    drainUntilClose(collector, "stream/location", listOf("location"))
                 }
 
                 webSocket("/v1/stream/sensors") {
@@ -886,7 +942,7 @@ class BridgeServer(
                             )
                         }
                     }
-                    drainUntilClose(collector)
+                    drainUntilClose(collector, "stream/sensors", listOf("sensors"))
                 }
 
                 webSocket("/v1/stream/touch") {
@@ -899,7 +955,7 @@ class BridgeServer(
                             sendJson(StreamEnvelope("touch", TimeUtil.nowIso(), json.encodeToJsonElement(reading)))
                         }
                     }
-                    drainUntilClose(collector)
+                    drainUntilClose(collector, "stream/touch", listOf("touch"))
                 }
 
                 // Raw microphone PCM as binary frames. Distinct from the `audio`
@@ -929,6 +985,10 @@ class BridgeServer(
                         ),
                     )
                     hub.addPcmSubscriber()
+                    val pcmIp = runCatching { call.request.origin.remoteHost }.getOrDefault("?")
+                    val pcmClientId = registry.register(
+                        pcmIp, listOf("audio"), "stream/audio/pcm", this, System.currentTimeMillis(),
+                    )
                     val collector = launch {
                         hub.audioPcm.collect { bytes -> send(Frame.Binary(true, bytes)) }
                     }
@@ -937,6 +997,7 @@ class BridgeServer(
                     } finally {
                         collector.cancel()
                         hub.removePcmSubscriber()
+                        registry.remove(pcmClientId)
                     }
                 }
             }
@@ -1033,7 +1094,13 @@ class BridgeServer(
      * noticed and its collector coroutine lingered forever. Draining `incoming`
      * makes client-close end the handler and the finally reclaim the collector.
      */
-    private suspend fun DefaultWebSocketServerSession.drainUntilClose(collector: kotlinx.coroutines.Job) {
+    private suspend fun DefaultWebSocketServerSession.drainUntilClose(
+        collector: kotlinx.coroutines.Job,
+        kind: String,
+        topics: List<String>,
+    ) {
+        val ip = runCatching { call.request.origin.remoteHost }.getOrDefault("?")
+        val clientId = registry.register(ip, topics, kind, this, System.currentTimeMillis())
         try {
             for (frame in incoming) {
                 // Ignore payloads; single-topic streams have no client protocol.
@@ -1041,6 +1108,7 @@ class BridgeServer(
             }
         } finally {
             collector.cancel()
+            registry.remove(clientId)
         }
     }
 
@@ -1079,6 +1147,8 @@ class BridgeServer(
         Route("get", "/v1/health", "Liveness, version, uptime", "meta"),
         Route("get", "/v1/openapi.json", "This OpenAPI descriptor", "meta"),
         Route("get", "/v1/diagnostics", "Collector health + degraded hints", "meta"),
+        Route("get", "/v1/clients", "List connected clients (active WS sessions)", "meta"),
+        Route("post", "/v1/clients/disconnect", "Disconnect all clients and rotate the token (panic)", "meta", mutating = true),
         Route("get", "/v1/config", "Server mode, endpoints, auth requirement", "meta"),
         Route("get", "/v1/capabilities", "Static device capability inventory", "meta"),
         Route("get", "/v1/debug/log", "Recent server log entries (?n=)", "meta"),
@@ -1278,6 +1348,28 @@ claude mcp add devicebridge -- node /path/to/mcp/dist/index.js \
         </body>
         </html>
         """.trimIndent()
+    }
+
+    /** Map a REST path to the privacy-dot signal it exposes, and mark it read. */
+    private fun markSignalRead(path: String) {
+        val now = System.currentTimeMillis()
+        val signal = when {
+            path.startsWith("/v1/location") -> "location"
+            path.startsWith("/v1/audio") -> "audio"
+            path.startsWith("/v1/sensors") -> "sensors"
+            path.startsWith("/v1/battery") -> "battery"
+            path.startsWith("/v1/network") -> "network"
+            path.startsWith("/v1/usb") -> "usb"
+            path.startsWith("/v1/camera") -> "camera"
+            // Snapshot reads everything at once — mark the sensitive signals.
+            path.startsWith("/v1/snapshot") -> "snapshot"
+            else -> return
+        }
+        if (signal == "snapshot") {
+            listOf("location", "audio", "sensors", "network", "usb").forEach { registry.markRead(it, now) }
+        } else {
+            registry.markRead(signal, now)
+        }
     }
 
     private fun authorized(call: ApplicationCall): Boolean {
