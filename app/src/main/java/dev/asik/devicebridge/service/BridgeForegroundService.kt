@@ -219,14 +219,22 @@ class BridgeForegroundService : Service() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
+            // New channel id: Android freezes channel importance after first create, so
+            // upgrading from IMPORTANCE_LOW requires a new id or users never see the bar icon.
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW,
+                NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
                 description = getString(R.string.notification_channel_desc)
+                setShowBadge(true)
+                enableVibration(false)
+                enableLights(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             nm.createNotificationChannel(channel)
+            // Drop the old silent channel if it still exists from earlier builds.
+            runCatching { nm.deleteNotificationChannel(CHANNEL_ID_LEGACY) }
         }
     }
 
@@ -245,17 +253,33 @@ class BridgeForegroundService : Service() {
         )
         val port = BridgePrefs.port(this)
         val mode = BridgePrefs.networkMode(this).name
-        val statusText = "Listening on port $port ($mode)"
+        val statusText = getString(R.string.notification_status, port, mode)
+        val micOn = BridgePrefs.streamAudio(this) || BridgePrefs.streamRawAudio(this)
+        val bigText = buildString {
+            append(statusText)
+            append('\n')
+            append(if (micOn) "Microphone: on" else "Microphone: off")
+            append(" · Tap to open · Stop ends the bridge")
+        }
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(statusText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openIntent)
             .addAction(0, getString(R.string.notification_stop), stopIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .build()
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setShowWhen(true)
+            .setUsesChronometer(true)
+            .setWhen(BridgeRuntime.startedAtMs.value.takeIf { it > 0 } ?: System.currentTimeMillis())
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+
+        return builder.build()
     }
 
     private fun updateNotification() {
@@ -264,7 +288,10 @@ class BridgeForegroundService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "bridge_service"
+        /** Visible service channel (DEFAULT importance — shows in shade / status). */
+        const val CHANNEL_ID = "bridge_service_v2"
+        /** Pre-1.3.2 silent channel (LOW) — deleted on create so it can't hide the FGS. */
+        private const val CHANNEL_ID_LEGACY = "bridge_service"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "dev.asik.devicebridge.STOP"
         const val ACTION_REFRESH_TYPES = "dev.asik.devicebridge.REFRESH_TYPES"

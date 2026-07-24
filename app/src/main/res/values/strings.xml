@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SensIO</string>
-    <string name="notification_channel_name">SensIO API service</string>
-    <string name="notification_channel_desc">Keeps the local SensIO API server running</string>
-    <string name="notification_title">SensIO API active</string>
+    <string name="notification_channel_name">SensIO running</string>
+    <string name="notification_channel_desc">Shows while the SensIO bridge service is active. Do not silence this channel or the service icon may disappear.</string>
+    <string name="notification_title">SensIO is running</string>
     <string name="notification_text">API at http://127.0.0.1:8765</string>
+    <string name="notification_status">Listening on port %1$d (%2$s)</string>
     <string name="notification_stop">Stop</string>
 
     <string name="theme_title">Appearance</string>
