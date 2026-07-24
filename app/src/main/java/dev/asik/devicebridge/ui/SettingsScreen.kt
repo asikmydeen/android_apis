@@ -60,6 +60,7 @@ fun SettingsScreen() {
     var streamLoc by remember { mutableStateOf(BridgePrefs.streamLocation(context)) }
     var streamSensors by remember { mutableStateOf(BridgePrefs.streamSensors(context)) }
     var streamAudio by remember { mutableStateOf(BridgePrefs.streamAudio(context)) }
+    var streamRawAudio by remember { mutableStateOf(BridgePrefs.streamRawAudio(context)) }
     var streamTouch by remember { mutableStateOf(BridgePrefs.streamTouch(context)) }
     var streamUsb by remember { mutableStateOf(BridgePrefs.streamUsb(context)) }
     var portText by remember { mutableStateOf(BridgePrefs.port(context).toString()) }
@@ -170,6 +171,27 @@ fun SettingsScreen() {
                     if (running) BridgeRuntime.restartServerIfRunning()
                     Toast.makeText(context, "Collectors reapplied", Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+
+        // ---- Raw audio streaming (sensitive, separate opt-in) --------
+        GlassCard {
+            SectionLabel("Raw audio streaming")
+            GlassText(
+                "Streams actual microphone audio (PCM) off-device over ws://…/v1/stream/audio/pcm — not just loudness levels. Only enable if a client genuinely needs raw audio; anyone with the token can then listen live.",
+                secondary = true,
+                size = 12.sp,
+            )
+            PrefSwitch("Allow raw microphone audio streaming", streamRawAudio) {
+                streamRawAudio = it
+                BridgePrefs.setStreamRawAudio(context, it)
+            }
+            if (streamRawAudio && !streamAudio) {
+                GlassText(
+                    "Turn on the Microphone collector above too — raw streaming needs it running.",
+                    secondary = true,
+                    size = 12.sp,
+                )
             }
         }
 

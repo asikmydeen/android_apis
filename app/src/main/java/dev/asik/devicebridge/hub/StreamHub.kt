@@ -11,6 +11,7 @@ import dev.asik.devicebridge.model.TelephonyReading
 import dev.asik.devicebridge.model.TouchReading
 import dev.asik.devicebridge.model.UsbEvent
 import dev.asik.devicebridge.model.UsbOverview
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * In-memory last-value cache + broadcast bus for REST snapshots and WebSockets.
@@ -56,6 +58,27 @@ class StreamHub {
         extraBufferCapacity = 256,
     )
     val events: SharedFlow<HubEvent> = _events.asSharedFlow()
+
+    // Raw PCM audio rides its OWN flow, never the shared _events bus — a ~172 KB/s
+    // binary stream would starve the 256-slot telemetry buffer and drop other
+    // clients' events. DROP_OLDEST keeps audio realtime instead of queueing latency.
+    private val _audioPcm = MutableSharedFlow<ByteArray>(
+        replay = 0,
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val audioPcm: SharedFlow<ByteArray> = _audioPcm.asSharedFlow()
+
+    // Sample tapping in AudioCollector is gated on this so there is zero cost
+    // (no ByteArray allocation/copy) when nobody is streaming raw audio.
+    private val pcmSubscribers = AtomicInteger(0)
+    fun pcmSubscriberCount(): Int = pcmSubscribers.get()
+    fun addPcmSubscriber(): Int = pcmSubscribers.incrementAndGet()
+    fun removePcmSubscriber(): Int = pcmSubscribers.decrementAndGet()
+
+    fun publishAudioPcm(bytes: ByteArray) {
+        _audioPcm.tryEmit(bytes)
+    }
 
     fun publishLocation(value: LocationReading) {
         _location.value = value

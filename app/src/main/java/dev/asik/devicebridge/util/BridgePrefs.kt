@@ -40,6 +40,7 @@ object BridgePrefs {
     private const val KEY_STREAM_LOCATION = "stream_location"
     private const val KEY_STREAM_SENSORS = "stream_sensors"
     private const val KEY_STREAM_AUDIO = "stream_audio"
+    private const val KEY_STREAM_RAW_AUDIO = "stream_raw_audio"
     private const val KEY_STREAM_TOUCH = "stream_touch"
     private const val KEY_STREAM_USB = "stream_usb"
 
@@ -176,6 +177,15 @@ object BridgePrefs {
 
     fun setStreamAudio(context: Context, v: Boolean) {
         prefs(context).edit().putBoolean(KEY_STREAM_AUDIO, v).apply()
+    }
+
+    /** Raw microphone PCM over WebSocket. Separate, explicit opt-in — far more
+     *  sensitive than dB levels, so enabling mic levels does NOT enable this. */
+    fun streamRawAudio(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STREAM_RAW_AUDIO, false)
+
+    fun setStreamRawAudio(context: Context, v: Boolean) {
+        prefs(context).edit().putBoolean(KEY_STREAM_RAW_AUDIO, v).apply()
     }
 
     fun streamTouch(context: Context): Boolean =

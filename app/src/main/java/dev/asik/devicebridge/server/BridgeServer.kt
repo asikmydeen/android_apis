@@ -16,6 +16,7 @@ import dev.asik.devicebridge.model.DeviceSnapshot
 import dev.asik.devicebridge.model.HealthResponse
 import dev.asik.devicebridge.model.SimpleStatus
 import dev.asik.devicebridge.model.StreamEnvelope
+import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.DiagnosticsBuilder
 import dev.asik.devicebridge.util.ErrorLog
 import dev.asik.devicebridge.util.NetworkAddresses
@@ -48,7 +49,9 @@ import io.ktor.server.routing.routing
 import io.ktor.server.websocket.DefaultWebSocketServerSession
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
+import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -852,6 +855,44 @@ class BridgeServer(
                     }
                     drainUntilClose(collector)
                 }
+
+                // Raw microphone PCM as binary frames. Distinct from the `audio`
+                // dB-level topic: this is actual samples for STT/recording. Gated on
+                // an explicit opt-in (streamRawAudio) beyond the mic-levels toggle,
+                // since raw audio leaving the device is far more sensitive.
+                webSocket("/v1/stream/audio/pcm") {
+                    val micOn = BridgePrefs.streamAudio(this@BridgeServer.context)
+                    val rawOn = BridgePrefs.streamRawAudio(this@BridgeServer.context)
+                    if (!micOn || !rawOn) {
+                        val why = if (!micOn) "microphone collector is off" else "raw audio streaming is disabled"
+                        ErrorLog.warn("pcm_denied", "raw audio stream refused: $why")
+                        close(CloseReason(CloseReason.Codes.CANNOT_ACCEPT, why))
+                        return@webSocket
+                    }
+                    // Announce the wire format so a client can decode without guessing.
+                    sendJson(
+                        StreamEnvelope(
+                            topic = "hello",
+                            ts = TimeUtil.nowIso(),
+                            data = buildJsonObject {
+                                put("stream", "audio_pcm")
+                                put("sample_rate", 44100)
+                                put("channels", 1)
+                                put("encoding", "pcm_s16le")
+                            },
+                        ),
+                    )
+                    hub.addPcmSubscriber()
+                    val collector = launch {
+                        hub.audioPcm.collect { bytes -> send(Frame.Binary(true, bytes)) }
+                    }
+                    try {
+                        for (frame in incoming) { /* observe close only */ }
+                    } finally {
+                        collector.cancel()
+                        hub.removePcmSubscriber()
+                    }
+                }
             }
         }
 
@@ -1029,6 +1070,7 @@ class BridgeServer(
         "/v1/stream/touch" to "Touch events only",
         "/v1/stream/usb" to "USB overview + attach/detach events",
         "/v1/usb/serial/{id}" to "Serial read stream for a device (open serial first)",
+        "/v1/stream/audio/pcm" to "Raw mic audio as binary frames (pcm_s16le, 44100Hz mono). Requires the raw-audio opt-in; first frame is a JSON hello with the format.",
     )
 
     private fun openApiJson(): String {

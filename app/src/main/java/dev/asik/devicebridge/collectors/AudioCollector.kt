@@ -62,6 +62,18 @@ class AudioCollector(
                 while (isActive) {
                     val read = recorder.read(buffer, 0, buffer.size)
                     if (read > 0) {
+                        // Raw PCM tap: only when a client is streaming (zero cost otherwise).
+                        // Emit this buffer as little-endian 16-bit bytes on the dedicated
+                        // PCM flow, before the dB reduction consumes it.
+                        if (hub.pcmSubscriberCount() > 0) {
+                            val pcm = ByteArray(read * 2)
+                            for (i in 0 until read) {
+                                val s = buffer[i].toInt()
+                                pcm[i * 2] = (s and 0xFF).toByte()
+                                pcm[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                            }
+                            hub.publishAudioPcm(pcm)
+                        }
                         for (i in 0 until read) {
                             val sample = buffer[i].toFloat()
                             accumulatedSum += sample * sample
