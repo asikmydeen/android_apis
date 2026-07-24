@@ -1,6 +1,7 @@
 package dev.asik.devicebridge
 
 import android.content.Context
+import dev.asik.devicebridge.collectors.ActuatorController
 import dev.asik.devicebridge.collectors.AudioCollector
 import dev.asik.devicebridge.collectors.BatteryCollector
 import dev.asik.devicebridge.collectors.CameraCollector
@@ -62,6 +63,8 @@ object BridgeRuntime {
         private set
     lateinit var usbCollector: UsbCollector
         private set
+    lateinit var actuator: ActuatorController
+        private set
 
     private var server: BridgeServer? = null
     private val serverMutex = Mutex()
@@ -98,6 +101,7 @@ object BridgeRuntime {
         touchCollector = TouchCollector(app, hub)
         cameraCollector = CameraCollector(app, hub)
         usbCollector = UsbCollector(app, hub, scope)
+        actuator = ActuatorController(app)
         refreshNetworkConfigFromPrefs()
     }
 
@@ -144,6 +148,7 @@ object BridgeRuntime {
                 capabilityScanner = capabilityScanner,
                 cameraCollector = cameraCollector,
                 usbCollector = usbCollector,
+                actuator = actuator,
                 bindHost = bind,
                 port = p,
                 version = VERSION,

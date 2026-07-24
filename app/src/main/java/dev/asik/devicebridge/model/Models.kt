@@ -372,3 +372,27 @@ data class SimpleStatus(
     val ok: Boolean,
     val message: String,
 )
+
+// ---- Actuation request bodies ----
+
+@Serializable
+data class LaunchAppRequest(val `package`: String)
+
+@Serializable
+data class FireIntentRequest(
+    val action: String,
+    val uri: String? = null,
+    val `package`: String? = null,
+)
+
+@Serializable
+data class SpeakRequest(val text: String)
+
+@Serializable
+data class TorchRequest(val on: Boolean)
+
+@Serializable
+data class VibrateRequest(val ms: Long = 200)
+
+@Serializable
+data class NotifyRequest(val title: String = "Device Bridge", val body: String)

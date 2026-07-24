@@ -2,6 +2,7 @@ package dev.asik.devicebridge.server
 
 import android.content.Context
 import android.util.Base64
+import dev.asik.devicebridge.collectors.ActuatorController
 import dev.asik.devicebridge.collectors.CameraCollector
 import dev.asik.devicebridge.collectors.CapabilityScanner
 import dev.asik.devicebridge.collectors.UsbCollector
@@ -14,7 +15,13 @@ import dev.asik.devicebridge.model.ClientControlMessage
 import dev.asik.devicebridge.model.ConfigResponse
 import dev.asik.devicebridge.model.DeviceSnapshot
 import dev.asik.devicebridge.model.HealthResponse
+import dev.asik.devicebridge.model.FireIntentRequest
+import dev.asik.devicebridge.model.LaunchAppRequest
+import dev.asik.devicebridge.model.NotifyRequest
 import dev.asik.devicebridge.model.SimpleStatus
+import dev.asik.devicebridge.model.SpeakRequest
+import dev.asik.devicebridge.model.TorchRequest
+import dev.asik.devicebridge.model.VibrateRequest
 import dev.asik.devicebridge.model.StreamEnvelope
 import dev.asik.devicebridge.util.BridgePrefs
 import dev.asik.devicebridge.util.DiagnosticsBuilder
@@ -39,6 +46,7 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.header
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
+import io.ktor.server.request.receive
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
@@ -77,6 +85,7 @@ class BridgeServer(
     private val capabilityScanner: CapabilityScanner,
     private val cameraCollector: CameraCollector,
     private val usbCollector: UsbCollector,
+    private val actuator: ActuatorController,
     private val bindHost: String,
     private val port: Int,
     private val version: String,
@@ -455,6 +464,43 @@ class BridgeServer(
 
                 post("/v1/control/stop") {
                     call.respond(SimpleStatus(true, "use the app notification or UI to stop the bridge service"))
+                }
+
+                // --- Actuation: make the phone DO things (safe, no restricted perms) ---
+                post("/v1/app/launch") {
+                    val req = call.receive<LaunchAppRequest>()
+                    val (ok, msg) = actuator.launchApp(req.`package`)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.NotFound, SimpleStatus(ok, msg))
+                }
+
+                post("/v1/intent") {
+                    val req = call.receive<FireIntentRequest>()
+                    val (ok, msg) = actuator.fireIntent(req.action, req.uri, req.`package`)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.BadRequest, SimpleStatus(ok, msg))
+                }
+
+                post("/v1/tts/speak") {
+                    val req = call.receive<SpeakRequest>()
+                    val (ok, msg) = actuator.speak(req.text)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.BadRequest, SimpleStatus(ok, msg))
+                }
+
+                post("/v1/torch") {
+                    val req = call.receive<TorchRequest>()
+                    val (ok, msg) = actuator.torch(req.on)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.InternalServerError, SimpleStatus(ok, msg))
+                }
+
+                post("/v1/vibrate") {
+                    val req = call.receive<VibrateRequest>()
+                    val (ok, msg) = actuator.vibrate(req.ms)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.InternalServerError, SimpleStatus(ok, msg))
+                }
+
+                post("/v1/notify") {
+                    val req = call.receive<NotifyRequest>()
+                    val (ok, msg) = actuator.notify(req.title, req.body)
+                    call.respond(if (ok) HttpStatusCode.OK else HttpStatusCode.InternalServerError, SimpleStatus(ok, msg))
                 }
 
                 // --- USB host: devices, storage volumes, serial ---
@@ -1051,6 +1097,12 @@ class BridgeServer(
         Route("get", "/v1/camera/last.jpg", "Last captured JPEG bytes", "camera"),
         Route("post", "/v1/control/start", "Start the bridge service", "control", mutating = true),
         Route("post", "/v1/control/stop", "Stop the bridge service", "control", mutating = true),
+        Route("post", "/v1/app/launch", "Launch an app by package name", "actuate", mutating = true),
+        Route("post", "/v1/intent", "Fire an intent / open a deep link", "actuate", mutating = true),
+        Route("post", "/v1/tts/speak", "Speak text aloud (TTS)", "actuate", mutating = true),
+        Route("post", "/v1/torch", "Turn the flashlight on/off", "actuate", mutating = true),
+        Route("post", "/v1/vibrate", "Vibrate for N ms", "actuate", mutating = true),
+        Route("post", "/v1/notify", "Post a local notification", "actuate", mutating = true),
         Route("get", "/v1/usb", "USB host overview", "usb"),
         Route("post", "/v1/usb/rescan", "Rescan attached USB devices", "usb", mutating = true),
         Route("get", "/v1/usb/devices", "Attached USB devices", "usb"),
