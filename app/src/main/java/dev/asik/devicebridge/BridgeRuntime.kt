@@ -35,7 +35,7 @@ import kotlinx.coroutines.sync.withLock
  * Process-wide runtime shared by the UI and foreground service.
  */
 object BridgeRuntime {
-    const val VERSION = "1.3.2"
+    const val VERSION = "1.3.3"
 
     private val job = SupervisorJob()
     val scope = CoroutineScope(job + Dispatchers.Default)
